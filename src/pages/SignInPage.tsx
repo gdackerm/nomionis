@@ -109,39 +109,39 @@ export function SignInPage(): JSX.Element {
       >
         <Stack gap="xl" maw={440}>
           <Group gap="sm">
-            <ThemeIcon size={44} radius="xl" variant="white" color="blue">
-              <IconStethoscope size={24} />
+            <ThemeIcon size={52} radius="xl" variant="white" color="blue">
+              <IconStethoscope size={28} />
             </ThemeIcon>
-            <Title order={2} c="white" fw={700}>
+            <Title order={1} c="white" fw={700} fz={28}>
               Nomionis
             </Title>
           </Group>
 
-          <Stack gap="xs">
-            <Title order={3} c="white" fw={600}>
+          <Stack gap="sm">
+            <Title order={2} c="white" fw={600} fz={26}>
               AI-native clinical intelligence
             </Title>
-            <Text c="rgba(255,255,255,0.8)" size="md" lh={1.6}>
+            <Text c="rgba(255,255,255,0.8)" size="lg" lh={1.6}>
               Not AI bolted onto an EHR. A system built from the ground up
               where intelligence is the interface.
             </Text>
           </Stack>
 
-          <Stack gap="xs">
-            <Text c="rgba(255,255,255,0.65)" size="xs" fw={600} tt="uppercase" lts={1}>
+          <Stack gap="sm">
+            <Text c="rgba(255,255,255,0.65)" size="sm" fw={600} tt="uppercase" lts={1}>
               When you open a patient chart, you see
             </Text>
-            <List spacing="sm" center>
+            <List spacing="md" center>
               {VALUE_PROPS.map((item) => (
                 <List.Item
                   key={item.text}
                   icon={
-                    <ThemeIcon size={28} radius="md" variant="light" color="rgba(255,255,255,0.2)">
-                      <item.icon size={16} color="white" />
+                    <ThemeIcon size={34} radius="md" variant="light" color="rgba(255,255,255,0.2)">
+                      <item.icon size={18} color="white" />
                     </ThemeIcon>
                   }
                 >
-                  <Text c="white" fw={500} size="sm">
+                  <Text c="white" fw={500} size="md">
                     {item.text}
                   </Text>
                 </List.Item>
@@ -149,11 +149,11 @@ export function SignInPage(): JSX.Element {
             </List>
           </Stack>
 
-          <Group gap={6}>
-            <Text c="rgba(255,255,255,0.65)" size="xs">
+          <Group gap={8}>
+            <Text c="rgba(255,255,255,0.65)" size="sm">
               No tabs. No hunting. Just what matters right now.
             </Text>
-            <IconArrowRight size={14} color="rgba(255,255,255,0.65)" />
+            <IconArrowRight size={16} color="rgba(255,255,255,0.65)" />
           </Group>
         </Stack>
       </Box>
