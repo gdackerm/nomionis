@@ -79,9 +79,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const handleSignIn = async (email: string, password: string): Promise<{ error?: string }> => {
-    const { error } = await authSignInWithPassword(email, password);
+    const { data, error } = await authSignInWithPassword(email, password);
     if (error) {
       return { error: error.message };
+    }
+    if (data.user) {
+      const p = await fetchPractitioner(data.user.id);
+      setPractitioner(p);
     }
     return {};
   };
