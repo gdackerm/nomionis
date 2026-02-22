@@ -112,53 +112,50 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return { error: 'Sign in after sign up failed' };
     }
 
-    // Check if a default organization exists
-    const { data: orgs, error: orgQueryError } = await supabase
+    // Create organization and practitioner with client-generated UUIDs
+    // to avoid RETURNING-clause RLS conflicts (no practitioner exists yet
+    // so org-scoped SELECT policies would reject the returned rows).
+    const orgId = crypto.randomUUID();
+    const { error: orgCreateError } = await supabase
       .from('organizations')
-      .select('id')
-      .limit(1);
+      .insert({ id: orgId, name: 'My Practice', type: 'prov', active: true });
 
-    if (orgQueryError) {
-      return { error: orgQueryError.message };
+    if (orgCreateError) {
+      return { error: orgCreateError.message };
     }
 
-    let orgId: string;
-
-    if (orgs && orgs.length > 0) {
-      orgId = orgs[0].id;
-    } else {
-      // Create a default organization
-      const { data: newOrg, error: orgCreateError } = await supabase
-        .from('organizations')
-        .insert({ name: 'My Practice', type: 'prov', active: true })
-        .select('id')
-        .single();
-
-      if (orgCreateError || !newOrg) {
-        return { error: orgCreateError?.message ?? 'Failed to create organization' };
-      }
-      orgId = newOrg.id;
-    }
-
-    // Create practitioner row
-    const { data: newPractitioner, error: practitionerError } = await supabase
+    const practitionerId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const { error: practitionerError } = await supabase
       .from('practitioners')
       .insert({
+        id: practitionerId,
         organization_id: orgId,
         auth_user_id: newUser.id,
         given_name: givenName,
         family_name: familyName,
         email,
         active: true,
-      })
-      .select('*')
-      .single();
+      });
 
     if (practitionerError) {
       return { error: practitionerError.message };
     }
 
-    setPractitioner(newPractitioner);
+    setPractitioner({
+      id: practitionerId,
+      organization_id: orgId,
+      auth_user_id: newUser.id,
+      given_name: givenName,
+      family_name: familyName,
+      email,
+      phone: null,
+      npi: null,
+      specialties: null,
+      active: true,
+      created_at: now,
+      updated_at: now,
+    });
     return {};
   };
 
