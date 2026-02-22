@@ -124,9 +124,10 @@ export function SignInPage(): JSX.Element {
           flex: 1,
           background: 'linear-gradient(135deg, #1864ab 0%, #228be6 60%, #339af0 100%)',
           display: 'flex',
-          flexDirection: 'column',
+          alignItems: 'center',
           justifyContent: 'center',
-          padding: '0 64px',
+          padding: 64,
+          paddingBottom: 180,
         }}
       >
         <Stack gap={32} maw={480}>
@@ -172,10 +173,10 @@ export function SignInPage(): JSX.Element {
           </Stack>
 
           <Group gap={8} mt={8}>
-            <Text c="rgba(255,255,255,0.55)" fz={14}>
+            <Text c="rgba(255,255,255,0.85)" fz={15} fw={500}>
               No tabs. No hunting. Just what matters right now.
             </Text>
-            <IconArrowRight size={16} color="rgba(255,255,255,0.55)" />
+            <IconArrowRight size={16} color="rgba(255,255,255,0.85)" />
           </Group>
         </Stack>
       </Box>

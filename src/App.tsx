@@ -180,7 +180,7 @@ export function App(): JSX.Element | null {
             <Route path="Task/:taskId" element={<TasksPage />} />
             <Route path="/onboarding" element={<IntakeFormPage />} />
             <Route path="/schedule" element={<SchedulePage />} />
-            <Route path="/signin" element={<SignInPage />} />
+            <Route path="/signin" element={<Navigate to="/" replace />} />
             <Route path="/integrations" element={<IntegrationsPage />} />
           </Routes>
         </Suspense>
