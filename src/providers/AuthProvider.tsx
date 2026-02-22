@@ -92,7 +92,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     givenName: string,
     familyName: string
   ): Promise<{ error?: string }> => {
-    const { data, error: signUpError } = await authSignUp(email, password, {
+    const { error: signUpError } = await authSignUp(email, password, {
       given_name: givenName,
       family_name: familyName,
     });
@@ -101,9 +101,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return { error: signUpError.message };
     }
 
-    const newUser = data.user;
+    // Explicitly sign in to ensure a valid session for subsequent queries
+    const { data: signInData, error: signInError } = await authSignInWithPassword(email, password);
+    if (signInError) {
+      return { error: signInError.message };
+    }
+
+    const newUser = signInData.user;
     if (!newUser) {
-      return { error: 'Sign up succeeded but no user was returned' };
+      return { error: 'Sign in after sign up failed' };
     }
 
     // Check if a default organization exists
