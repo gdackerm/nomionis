@@ -5,10 +5,10 @@ import {
   Button,
   Card,
   Center,
+  Divider,
   Group,
   List,
   PasswordInput,
-  SegmentedControl,
   Stack,
   Text,
   TextInput,
@@ -19,6 +19,8 @@ import {
   IconAlertCircle,
   IconArrowRight,
   IconBrain,
+  IconBrandGoogle,
+  IconBrandWindows,
   IconHeartRateMonitor,
   IconReportMedical,
   IconStethoscope,
@@ -183,30 +185,40 @@ export function SignInPage(): JSX.Element {
             </Stack>
 
             <Card shadow="lg" padding={32} radius="lg" w="100%" withBorder>
-              <Stack align="center" gap="lg">
+              <Stack gap="lg">
                 <Stack align="center" gap={4}>
-                  <Title order={3} hiddenFrom="md">
-                    Welcome
-                  </Title>
-                  <Title order={3} visibleFrom="md">
-                    Welcome
-                  </Title>
+                  <Title order={3}>Welcome</Title>
                   <Text c="dimmed" size="sm" ta="center">
-                    Sign in to access the provider portal
+                    {mode === 'signin'
+                      ? 'Sign in to access the provider portal'
+                      : 'Create your account to get started'}
                   </Text>
                 </Stack>
-                <SegmentedControl
-                  value={mode}
-                  onChange={(v) => {
-                    setMode(v);
-                    setError(null);
-                  }}
-                  data={[
-                    { label: 'Sign In', value: 'signin' },
-                    { label: 'Sign Up', value: 'signup' },
-                  ]}
-                  fullWidth
-                />
+
+                {/* SSO buttons */}
+                <Stack gap="xs">
+                  <Button
+                    variant="default"
+                    size="md"
+                    fullWidth
+                    leftSection={<IconBrandGoogle size={18} />}
+                    onClick={() => {}}
+                  >
+                    Continue with Google
+                  </Button>
+                  <Button
+                    variant="default"
+                    size="md"
+                    fullWidth
+                    leftSection={<IconBrandWindows size={18} />}
+                    onClick={() => {}}
+                  >
+                    Continue with Microsoft
+                  </Button>
+                </Stack>
+
+                <Divider label="or continue with email" labelPosition="center" />
+
                 {error && (
                   <Alert
                     icon={<IconAlertCircle size={16} />}
@@ -217,6 +229,7 @@ export function SignInPage(): JSX.Element {
                     {error}
                   </Alert>
                 )}
+
                 <Stack w="100%" gap="sm" onKeyDown={handleKeyDown}>
                   {mode === 'signup' && (
                     <Group grow>
@@ -258,6 +271,7 @@ export function SignInPage(): JSX.Element {
                     </Group>
                   )}
                 </Stack>
+
                 {mode === 'signin' ? (
                   <Button
                     size="md"
@@ -279,6 +293,24 @@ export function SignInPage(): JSX.Element {
                     Create Account
                   </Button>
                 )}
+
+                <Text size="xs" c="dimmed" ta="center">
+                  {mode === 'signin' ? (
+                    <>
+                      Don&apos;t have an account?{' '}
+                      <Anchor size="xs" onClick={() => { setMode('signup'); setError(null); }}>
+                        Sign up
+                      </Anchor>
+                    </>
+                  ) : (
+                    <>
+                      Already have an account?{' '}
+                      <Anchor size="xs" onClick={() => { setMode('signin'); setError(null); }}>
+                        Sign in
+                      </Anchor>
+                    </>
+                  )}
+                </Text>
               </Stack>
             </Card>
             <Text size="xs" c="dimmed">
