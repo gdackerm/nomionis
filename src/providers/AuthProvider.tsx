@@ -2,7 +2,8 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase/client';
 import {
-  signInWithGoogle as authSignInWithGoogle,
+  signInWithPassword as authSignInWithPassword,
+  signUp as authSignUp,
   signOut as authSignOut,
   onAuthStateChange,
   getSession,
@@ -17,7 +18,8 @@ interface AuthContextValue {
   practitioner: Practitioner | null;
   organizationId: string | null;
   loading: boolean;
-  signInWithGoogle: () => Promise<any>;
+  signIn: (email: string, password: string) => Promise<{ error?: string }>;
+  signUp: (email: string, password: string, givenName: string, familyName: string) => Promise<{ error?: string }>;
   signOut: () => Promise<any>;
 }
 
@@ -76,6 +78,84 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
+  const handleSignIn = async (email: string, password: string): Promise<{ error?: string }> => {
+    const { error } = await authSignInWithPassword(email, password);
+    if (error) {
+      return { error: error.message };
+    }
+    return {};
+  };
+
+  const handleSignUp = async (
+    email: string,
+    password: string,
+    givenName: string,
+    familyName: string
+  ): Promise<{ error?: string }> => {
+    const { data, error: signUpError } = await authSignUp(email, password, {
+      given_name: givenName,
+      family_name: familyName,
+    });
+
+    if (signUpError) {
+      return { error: signUpError.message };
+    }
+
+    const newUser = data.user;
+    if (!newUser) {
+      return { error: 'Sign up succeeded but no user was returned' };
+    }
+
+    // Check if a default organization exists
+    const { data: orgs, error: orgQueryError } = await supabase
+      .from('organizations')
+      .select('id')
+      .limit(1);
+
+    if (orgQueryError) {
+      return { error: orgQueryError.message };
+    }
+
+    let orgId: string;
+
+    if (orgs && orgs.length > 0) {
+      orgId = orgs[0].id;
+    } else {
+      // Create a default organization
+      const { data: newOrg, error: orgCreateError } = await supabase
+        .from('organizations')
+        .insert({ name: 'My Practice', type: 'prov', active: true })
+        .select('id')
+        .single();
+
+      if (orgCreateError || !newOrg) {
+        return { error: orgCreateError?.message ?? 'Failed to create organization' };
+      }
+      orgId = newOrg.id;
+    }
+
+    // Create practitioner row
+    const { data: newPractitioner, error: practitionerError } = await supabase
+      .from('practitioners')
+      .insert({
+        organization_id: orgId,
+        auth_user_id: newUser.id,
+        given_name: givenName,
+        family_name: familyName,
+        email,
+        active: true,
+      })
+      .select('*')
+      .single();
+
+    if (practitionerError) {
+      return { error: practitionerError.message };
+    }
+
+    setPractitioner(newPractitioner);
+    return {};
+  };
+
   const user = session?.user ?? null;
   const organizationId = practitioner?.organization_id ?? null;
 
@@ -85,7 +165,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     practitioner,
     organizationId,
     loading,
-    signInWithGoogle: authSignInWithGoogle,
+    signIn: handleSignIn,
+    signUp: handleSignUp,
     signOut: authSignOut,
   };
 
