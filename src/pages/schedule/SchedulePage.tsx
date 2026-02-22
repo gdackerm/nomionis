@@ -1,18 +1,5 @@
-// SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
-// SPDX-License-Identifier: Apache-2.0
 import { Box, Button, Center, Drawer, Group, Loader, Stack, Text, Title } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import {
-  createReference,
-  EMPTY,
-  isDefined,
-  formatDateTime,
-  getExtensionValue,
-  getReferenceString,
-} from '@medplum/core';
-import type { WithId } from '@medplum/core';
-import type { Appointment, Bundle, CodeableConcept, Practitioner, Schedule, Slot } from '@medplum/fhirtypes';
-import { CodeableConceptDisplay, useMedplum, useMedplumProfile } from '@medplum/react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import type { SlotInfo } from 'react-big-calendar';
@@ -22,97 +9,193 @@ import { AppointmentDetails } from '../../components/schedule/AppointmentDetails
 import { CreateVisit } from '../../components/schedule/CreateVisit';
 import { showErrorNotification } from '../../utils/notifications';
 import { Calendar } from '../../components/Calendar';
-import { mergeOverlappingSlots } from '../../utils/slots';
 import type { Range } from '../../types/scheduling';
 import { IconChevronRight, IconX } from '@tabler/icons-react';
 import classes from './SchedulePage.module.css';
-import { useSchedulingStartsAt } from '../../hooks/useSchedulingStartsAt';
-import { SchedulingTransientIdentifier } from '../../utils/scheduling';
+import { useAuth } from '../../providers/AuthProvider';
+import { supabase } from '../../lib/supabase/client';
+import { scheduleService } from '../../services/schedule.service';
+import { slotService } from '../../services/slot.service';
+import { appointmentService } from '../../services/appointment.service';
+import { formatDateTime } from '../../lib/utils';
+import type { Tables } from '../../lib/supabase/types';
 
-type ScheduleFindPaneProps = {
-  schedule: WithId<Schedule>;
-  range: Range;
-  onChange: (slots: Slot[]) => void;
-  onSelectSlot: (slot: Slot) => void;
-  slots: Slot[] | undefined;
-};
+type Schedule = Tables<'schedules'>;
+type Slot = Tables<'slots'>;
+type Appointment = Tables<'appointments'>;
 
-const SchedulingParametersURI = 'https://medplum.com/fhir/StructureDefinition/SchedulingParameters';
-
-function parseSchedulingParameters(schedule: Schedule): (CodeableConcept | undefined)[] {
-  const extensions = schedule?.extension?.filter((ext) => ext.url === SchedulingParametersURI) ?? [];
-  const serviceTypes = extensions.map((ext) => getExtensionValue(ext, 'serviceType') as CodeableConcept | undefined);
-  return serviceTypes;
+// Service type entry stored in the schedule's service_types JSON field.
+// Each entry has a display name and optional coding information.
+interface ServiceTypeEntry {
+  display?: string;
+  system?: string;
+  code?: string;
 }
 
-// Allows selection of a ServiceType found in the schedule's
-// SchedulingParameters extensions, and runs a `$find` operation to look for
-// upcoming slots that can be used to book an Appointment of that type.
-//
-// See https://www.medplum.com/docs/scheduling/defining-availability for details.
+function parseServiceTypes(schedule: Schedule): (ServiceTypeEntry | undefined)[] {
+  if (!schedule.service_types) {
+    return [];
+  }
+  try {
+    const raw = schedule.service_types as ServiceTypeEntry[];
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+    return raw;
+  } catch {
+    return [];
+  }
+}
+
+function getServiceTypeLabel(st: ServiceTypeEntry | undefined): string {
+  if (!st) return 'Other';
+  return st.display || st.code || 'Other';
+}
+
+// Adapts a Supabase slot row into the shape the Calendar component expects
+// (which uses FHIR-style `start`/`end` string fields).
+function toCalendarSlot(slot: Slot, transientId?: string): any {
+  const adapted: any = {
+    ...slot,
+    start: slot.start_time,
+    end: slot.end_time,
+    status: slot.status,
+    id: slot.id,
+  };
+  if (transientId) {
+    // Tag with a transient identifier so Calendar treats it as a foreground event
+    if (!adapted.identifier) {
+      adapted.identifier = [];
+    }
+    adapted.identifier.push({
+      system: 'urn:scheduling-transient',
+      value: transientId,
+    });
+  }
+  return adapted;
+}
+
+// Adapts a Supabase appointment row into the shape the Calendar component expects.
+function toCalendarAppointment(appointment: Appointment): any {
+  return {
+    ...appointment,
+    start: appointment.start_time,
+    end: appointment.end_time,
+    status: appointment.status,
+    id: appointment.id,
+    // Calendar expects a participant array for display; provide a minimal one
+    participant: [],
+  };
+}
+
+// Merge overlapping slots of the same status into single slots (inline version
+// that works with Supabase Slot types instead of FHIR Slot types).
+function mergeOverlappingSlots(slots: Slot[]): Slot[] {
+  type DecoratedSlot = { slot: Slot; start: Date; end: Date };
+
+  const slotsByStatus: Record<string, DecoratedSlot[]> = {};
+  slots.forEach((slot) => {
+    if (!slotsByStatus[slot.status]) {
+      slotsByStatus[slot.status] = [];
+    }
+    slotsByStatus[slot.status].push({
+      slot,
+      start: new Date(slot.start_time),
+      end: new Date(slot.end_time),
+    });
+  });
+
+  return Object.values(slotsByStatus).flatMap((statusSlots) => {
+    return statusSlots
+      .sort((a, b) => a.start.getTime() - b.start.getTime())
+      .reduce<DecoratedSlot[]>((acc, ds) => {
+        const last = acc.at(-1);
+        if (!last) {
+          return [ds];
+        }
+
+        if (ds.start <= last.end) {
+          if (ds.end > last.end) {
+            last.end = ds.end;
+            last.slot = { ...last.slot, end_time: ds.slot.end_time };
+          }
+        } else {
+          acc.push(ds);
+        }
+
+        return acc;
+      }, [])
+      .map((ds) => ds.slot);
+  });
+}
+
+type ScheduleFindPaneProps = {
+  schedule: Schedule;
+  range: Range;
+  onChange: (slots: any[]) => void;
+  onSelectSlot: (slot: any) => void;
+  slots: any[] | undefined;
+};
+
+// Allows selection of a ServiceType found in the schedule's service_types JSON,
+// and queries for upcoming free slots that can be used to book an Appointment.
 export function ScheduleFindPane(props: ScheduleFindPaneProps): JSX.Element {
   const { schedule, onChange, range } = props;
   const serviceTypes = useMemo(
     () =>
-      parseSchedulingParameters(schedule).map((codeableConcept) => ({
-        codeableConcept,
+      parseServiceTypes(schedule).map((entry) => ({
+        entry,
         id: uuidv4(),
       })),
     [schedule]
   );
 
-  const medplum = useMedplum();
-
   // null: no selection made
   // undefined: "wildcard" availability selected
-  // Coding: a specific service type was selected
-  const [serviceType, setServiceType] = useState<CodeableConcept | undefined | null>(
-    // If there is exactly one option, select it immediately instead of forcing user
-    // to select it
-    serviceTypes.length === 1 ? serviceTypes[0].codeableConcept : null
+  // ServiceTypeEntry: a specific service type was selected
+  const [serviceType, setServiceType] = useState<ServiceTypeEntry | undefined | null>(
+    serviceTypes.length === 1 ? serviceTypes[0].entry : null
   );
 
   // Ensure that we are searching for slots in the future by at least 30 minutes.
-  const earliestSchedulable = useSchedulingStartsAt({ minimumNoticeMinutes: 30 });
+  const now = useMemo(() => new Date(), []);
+  const earliestSchedulable = useMemo(() => new Date(now.getTime() + 30 * 60 * 1000), [now]);
   const searchStart = range.start < earliestSchedulable ? earliestSchedulable : range.start;
   const searchEnd = searchStart < range.end ? range.end : new Date(searchStart.getTime() + 1000 * 60 * 60 * 24 * 7);
 
-  const start = searchStart.toISOString();
-  const end = searchEnd.toISOString();
+  const startISO = searchStart.toISOString();
+  const endISO = searchEnd.toISOString();
 
   useEffect(() => {
     if (!schedule || serviceType === null) {
       return () => {};
     }
-    const controller = new AbortController();
-    const signal = controller.signal;
-    const params = new URLSearchParams({ start, end });
-    if (serviceType) {
-      serviceType.coding?.forEach((coding) => {
-        params.append('service-type', `${coding.system}|${coding.code}`);
-      });
-    }
-    medplum
-      .get<Bundle<Slot>>(`fhir/R4/Schedule/${schedule.id}/$find?${params}`, { signal })
-      .then((bundle) => {
-        if (!signal.aborted) {
-          if (bundle.entry) {
-            bundle.entry.forEach((entry) => entry.resource && SchedulingTransientIdentifier.set(entry.resource));
-            onChange(bundle.entry.map((entry) => entry.resource).filter(isDefined));
-          } else {
-            onChange([]);
-          }
-        }
-      })
-      .catch((error) => {
-        if (!signal.aborted) {
+    let active = true;
+
+    supabase
+      .from('slots')
+      .select('*')
+      .eq('schedule_id', schedule.id)
+      .gte('start_time', startISO)
+      .lte('start_time', endISO)
+      .eq('status', 'free')
+      .order('start_time', { ascending: true })
+      .then(({ data, error }) => {
+        if (!active) return;
+        if (error) {
           showErrorNotification(error);
+          return;
         }
+        // Tag each slot with a transient identifier so the Calendar shows them
+        // as foreground events and so we can track which one was booked.
+        const taggedSlots = (data ?? []).map((slot) => toCalendarSlot(slot, uuidv4()));
+        onChange(taggedSlots);
       });
+
     return () => {
-      controller.abort();
+      active = false;
     };
-  }, [medplum, schedule, serviceType, start, end, onChange]);
+  }, [schedule, serviceType, startISO, endISO, onChange]);
 
   const handleDismiss = useCallback(() => {
     setServiceType(null);
@@ -124,7 +207,7 @@ export function ScheduleFindPane(props: ScheduleFindPaneProps): JSX.Element {
       <Stack gap="sm" justify="flex-start">
         <Title order={4}>
           <Group justify="space-between">
-            <span>{serviceType ? <CodeableConceptDisplay value={serviceType} /> : 'Event'}</span>
+            <span>{serviceType ? getServiceTypeLabel(serviceType) : 'Event'}</span>
             {serviceTypes.length > 1 && (
               <Button variant="subtle" onClick={handleDismiss} aria-label="Clear selection">
                 <IconX size={20} />
@@ -132,15 +215,15 @@ export function ScheduleFindPane(props: ScheduleFindPaneProps): JSX.Element {
             )}
           </Group>
         </Title>
-        {(props.slots ?? EMPTY).map((slot) => (
+        {(props.slots ?? []).map((slot: any) => (
           <Button
-            key={SchedulingTransientIdentifier.get(slot)}
+            key={slot.id}
             variant="outline"
             color="gray.3"
             styles={(theme) => ({ label: { fontWeight: 'normal', color: theme.colors.gray[9] } })}
             onClick={() => props.onSelectSlot(slot)}
           >
-            {formatDateTime(slot.start)}
+            {formatDateTime(slot.start_time ?? slot.start)}
           </Button>
         ))}
       </Stack>
@@ -157,9 +240,9 @@ export function ScheduleFindPane(props: ScheduleFindPaneProps): JSX.Element {
           variant="outline"
           rightSection={<IconChevronRight size={12} />}
           justify="space-between"
-          onClick={() => setServiceType(st.codeableConcept)}
+          onClick={() => setServiceType(st.entry)}
         >
-          {st.codeableConcept ? <CodeableConceptDisplay value={st.codeableConcept} /> : 'Other'}
+          {getServiceTypeLabel(st.entry)}
         </Button>
       ))}
     </Stack>
@@ -173,44 +256,43 @@ export function ScheduleFindPane(props: ScheduleFindPaneProps): JSX.Element {
  */
 export function SchedulePage(): JSX.Element | null {
   const navigate = useNavigate();
-  const medplum = useMedplum();
-  const profile = useMedplumProfile() as Practitioner;
+  const { practitioner, organizationId, loading } = useAuth();
   const [createAppointmentOpened, createAppointmentHandlers] = useDisclosure(false);
   const [appointmentDetailsOpened, appointmentDetailsHandlers] = useDisclosure(false);
-  const [schedule, setSchedule] = useState<WithId<Schedule> | undefined>();
+  const [schedule, setSchedule] = useState<Schedule | undefined>();
   const [range, setRange] = useState<Range | undefined>(undefined);
   const [slots, setSlots] = useState<Slot[] | undefined>(undefined);
   const [appointments, setAppointments] = useState<Appointment[] | undefined>(undefined);
-  const [findSlots, setFindSlots] = useState<Slot[] | undefined>(undefined);
+  const [findSlots, setFindSlots] = useState<any[] | undefined>(undefined);
 
   const [appointmentSlot, setAppointmentSlot] = useState<Range>();
   const [appointmentDetails, setAppointmentDetails] = useState<Appointment | undefined>(undefined);
 
   useEffect(() => {
-    if (medplum.isLoading() || !profile) {
+    if (loading || !practitioner || !organizationId) {
       return;
     }
 
-    // Search for a Schedule associated with the logged user,
+    // Search for a Schedule associated with the logged-in practitioner,
     // create one if it doesn't exist
-    medplum
-      .searchOne('Schedule', { actor: getReferenceString(profile) })
-      .then((foundSchedule) => {
-        if (foundSchedule) {
-          setSchedule(foundSchedule);
+    scheduleService
+      .list({ filters: { practitioner_id: practitioner.id, organization_id: organizationId } })
+      .then(({ data }) => {
+        if (data.length > 0) {
+          setSchedule(data[0] as Schedule);
         } else {
-          medplum
-            .createResource({
-              resourceType: 'Schedule',
-              actor: [createReference(profile)],
+          scheduleService
+            .create({
+              organization_id: organizationId,
+              practitioner_id: practitioner.id,
               active: true,
             })
-            .then(setSchedule)
+            .then((created) => setSchedule(created as Schedule))
             .catch(showErrorNotification);
         }
       })
       .catch(showErrorNotification);
-  }, [medplum, profile]);
+  }, [loading, practitioner, organizationId]);
 
   // Find slots visible in the current range
   useEffect(() => {
@@ -219,43 +301,52 @@ export function SchedulePage(): JSX.Element | null {
     }
     let active = true;
 
-    medplum
-      .searchResources('Slot', [
-        ['_count', '1000'],
-        ['schedule', getReferenceString(schedule)],
-        ['start', `ge${range.start.toISOString()}`],
-        ['start', `le${range.end.toISOString()}`],
-        ['status', 'free,busy-unavailable'],
-      ])
-      .then((rawSlots) => active && setSlots(mergeOverlappingSlots(rawSlots)))
+    slotService
+      .getByScheduleAndDateRange(schedule.id, range.start.toISOString(), range.end.toISOString())
+      .then((rawSlots) => {
+        if (!active) return;
+        // Filter to free and busy-unavailable, then merge overlapping
+        const filtered = rawSlots.filter(
+          (s) => s.status === 'free' || s.status === 'busy-unavailable'
+        );
+        setSlots(mergeOverlappingSlots(filtered));
+      })
       .catch((error: unknown) => active && showErrorNotification(error));
 
     return () => {
       active = false;
     };
-  }, [medplum, schedule, range]);
+  }, [schedule, range]);
 
   // Find appointments visible in the current range
   useEffect(() => {
-    if (!profile || !range) {
+    if (!practitioner || !range || !organizationId) {
       return () => {};
     }
     let active = true;
 
-    medplum
-      .searchResources('Appointment', [
-        ['_count', '1000'],
-        ['actor', getReferenceString(profile as WithId<Practitioner>)],
-        ['date', `ge${range.start.toISOString()}`],
-        ['date', `le${range.end.toISOString()}`],
-      ])
-      .then((appointments) => active && setAppointments(appointments))
-      .catch((error: unknown) => active && showErrorNotification(error));
+    supabase
+      .from('appointments')
+      .select('*')
+      .eq('practitioner_id', practitioner.id)
+      .eq('organization_id', organizationId)
+      .gte('start_time', range.start.toISOString())
+      .lte('start_time', range.end.toISOString())
+      .order('start_time', { ascending: true })
+      .limit(1000)
+      .then(({ data, error }) => {
+        if (!active) return;
+        if (error) {
+          showErrorNotification(error);
+          return;
+        }
+        setAppointments(data ?? []);
+      });
 
     return () => {
       active = false;
     };
-  }, [medplum, profile, range]);
+  }, [practitioner, organizationId, range]);
 
   // When a date/time interval is selected, set the event object and open the
   // create appointment modal
@@ -268,46 +359,52 @@ export function SchedulePage(): JSX.Element | null {
   );
 
   const bookSlot = useCallback(
-    async (slot: Slot) => {
-      const data = await medplum.post<Bundle<Appointment | Slot>>(medplum.fhirUrl('Appointment', '$book'), {
-        resourceType: 'Parameters',
-        parameter: [{ name: 'slot', resource: slot }],
+    async (slot: any) => {
+      // The slot coming from the find pane may have adapted fields;
+      // resolve the actual slot ID and times.
+      const slotId: string = slot.id;
+      const startTime: string = slot.start_time ?? slot.start;
+      const endTime: string = slot.end_time ?? slot.end;
+
+      if (!practitioner || !organizationId) {
+        throw new Error('Not authenticated');
+      }
+
+      // Create an appointment for this slot
+      const newAppointment = await appointmentService.create({
+        organization_id: organizationId,
+        status: 'booked',
+        start_time: startTime,
+        end_time: endTime,
+        practitioner_id: practitioner.id,
+        slot_id: slotId,
       });
-      medplum.invalidateSearches('Appointment');
-      medplum.invalidateSearches('Slot');
+
+      // Mark the slot as busy
+      await slotService.update(slotId, { status: 'busy' });
 
       // Remove the $find result we acted on from our state
-      const id = SchedulingTransientIdentifier.get(slot);
-      setFindSlots((slots) => (slots ?? EMPTY).filter((slot) => SchedulingTransientIdentifier.get(slot) !== id));
+      setFindSlots((prev) => (prev ?? []).filter((s: any) => s.id !== slotId));
 
-      // Add the $book response to our state
-      const resources = data.entry?.map((entry) => entry.resource).filter(isDefined) ?? EMPTY;
-      const slots = resources
-        .filter((obj: Slot | Appointment): obj is Slot => obj.resourceType === 'Slot')
-        .filter((slot) => slot.status !== 'busy');
-      const appointments = resources.filter(
-        (obj: Slot | Appointment): obj is Appointment => obj.resourceType === 'Appointment'
-      );
-      setAppointments((state) => appointments.concat(state ?? EMPTY));
-      setSlots((state) => slots.concat(state ?? EMPTY));
+      // Add the new appointment to our state
+      const createdAppointment = newAppointment as Appointment;
+      setAppointments((state) => [createdAppointment, ...(state ?? [])]);
 
       // Open the appointment details drawer for the resource we just created
-      const firstAppointment = appointments[0];
-      if (firstAppointment) {
-        setAppointmentDetails(firstAppointment);
-        appointmentDetailsHandlers.open();
-      }
+      setAppointmentDetails(createdAppointment);
+      appointmentDetailsHandlers.open();
     },
-    [medplum, appointmentDetailsHandlers]
+    [practitioner, organizationId, appointmentDetailsHandlers]
   );
 
   const [bookLoading, setBookLoading] = useState(false);
 
   const handleSelectSlot = useCallback(
-    (slot: Slot) => {
-      // If selecting a slot from "$find", run it through "$book" to create an
-      // appointment and slots
-      if (SchedulingTransientIdentifier.get(slot)) {
+    (slot: any) => {
+      // If selecting a slot from the find pane (has transient identifier), book it
+      const isTransient =
+        slot.identifier?.some?.((id: any) => id.system === 'urn:scheduling-transient');
+      if (isTransient) {
         setBookLoading(true);
         bookSlot(slot)
           .catch(showErrorNotification)
@@ -318,51 +415,83 @@ export function SchedulePage(): JSX.Element | null {
       // When a "free" slot is selected, open the create appointment modal
       if (slot.status === 'free') {
         createAppointmentHandlers.open();
-        setAppointmentSlot({ start: new Date(slot.start), end: new Date(slot.end) });
+        setAppointmentSlot({
+          start: new Date(slot.start_time ?? slot.start),
+          end: new Date(slot.end_time ?? slot.end),
+        });
       }
     },
     [createAppointmentHandlers, bookSlot]
   );
 
-  // When an appointment is selected, navigate to the detail page
+  // When an appointment is selected, navigate to the encounter detail page or
+  // open the appointment details drawer
   const handleSelectAppointment = useCallback(
-    async (appointment: Appointment) => {
-      const reference = getReferenceString(appointment);
-      if (!reference) {
+    async (appointment: any) => {
+      const appointmentId = appointment.id;
+      if (!appointmentId) {
         showErrorNotification("Can't navigate to unsaved appointment");
         return;
       }
 
-      try {
-        const encounters = await medplum.searchResources('Encounter', [
-          ['appointment', reference],
-          ['_count', '1'],
-        ]);
+      // Resolve the Supabase Appointment record from the adapted calendar object
+      const resolvedAppointment: Appointment =
+        appointment.start_time !== undefined
+          ? appointment
+          : {
+              ...appointment,
+              start_time: appointment.start,
+              end_time: appointment.end,
+            };
 
-        if (encounters.length === 0) {
-          setAppointmentDetails(appointment);
+      try {
+        // Look up an encounter linked to this appointment
+        const { data: encounters, error } = await supabase
+          .from('encounters')
+          .select('*')
+          .eq('appointment_id', appointmentId)
+          .limit(1);
+
+        if (error) throw error;
+
+        if (!encounters || encounters.length === 0) {
+          setAppointmentDetails(resolvedAppointment);
           appointmentDetailsHandlers.open();
           return;
         }
 
-        const patient = encounters?.[0]?.subject;
-        if (patient?.reference) {
-          await navigate(`/${patient.reference}/Encounter/${encounters?.[0]?.id}`);
+        const encounter = encounters[0];
+        const patientId = encounter.patient_id;
+        if (patientId) {
+          await navigate(`/patients/${patientId}/Encounter/${encounter.id}`);
         }
       } catch (error) {
         showErrorNotification(error);
       }
     },
-    [medplum, navigate, appointmentDetailsHandlers]
+    [navigate, appointmentDetailsHandlers]
   );
 
   const height = window.innerHeight - 60;
-  const serviceTypes = useMemo(() => schedule && parseSchedulingParameters(schedule), [schedule]);
+  const serviceTypes = useMemo(() => schedule && parseServiceTypes(schedule), [schedule]);
 
   const handleAppointmentUpdate = useCallback((updated: Appointment) => {
-    setAppointments((state) => (state ?? []).map((existing) => (existing.id === updated.id ? updated : existing)));
+    setAppointments((state) =>
+      (state ?? []).map((existing) => (existing.id === updated.id ? updated : existing))
+    );
     setAppointmentDetails((existing) => (existing?.id === updated.id ? updated : existing));
   }, []);
+
+  // Adapt Supabase slot/appointment data to the shapes the Calendar component expects
+  const calendarSlots = useMemo(() => {
+    const regularSlots = (slots ?? []).map((s) => toCalendarSlot(s));
+    return [...regularSlots, ...(findSlots ?? [])];
+  }, [slots, findSlots]);
+
+  const calendarAppointments = useMemo(
+    () => (appointments ?? []).map(toCalendarAppointment),
+    [appointments]
+  );
 
   return (
     <Box pos="relative" bg="white" p="md" style={{ height }}>
@@ -373,8 +502,8 @@ export function SchedulePage(): JSX.Element | null {
             onSelectInterval={handleSelectInterval}
             onSelectAppointment={handleSelectAppointment}
             onSelectSlot={handleSelectSlot}
-            slots={[...(slots ?? []), ...(findSlots ?? [])]}
-            appointments={appointments ?? []}
+            slots={calendarSlots}
+            appointments={calendarAppointments}
             onRangeChange={setRange}
           />
         </div>

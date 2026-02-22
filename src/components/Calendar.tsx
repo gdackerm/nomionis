@@ -3,7 +3,6 @@
 import { useCallback, useState, useEffect } from 'react';
 import type { JSX } from 'react';
 import { Button, Group, SegmentedControl, Title } from '@mantine/core';
-import type { Appointment, Slot } from '@medplum/fhirtypes';
 import { Calendar as ReactBigCalendar, dayjsLocalizer } from 'react-big-calendar';
 import type { Event, SlotInfo, ToolbarProps, View } from 'react-big-calendar';
 import dayjs from 'dayjs';
@@ -12,23 +11,38 @@ import utc from 'dayjs/plugin/utc';
 import { IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
 import 'react-big-calendar/lib/css/react-big-calendar.css';
 import type { Range } from '../types/scheduling';
-import { SchedulingTransientIdentifier } from '../utils/scheduling';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.tz.setDefault(dayjs.tz.guess());
 
-type AppointmentEvent = Event & { type: 'appointment'; appointment: Appointment; start: Date; end: Date };
-type SlotEvent = Event & { type: 'slot'; slot: Slot; status: string; start: Date; end: Date };
+// Generic slot/appointment shapes accepted by the Calendar.
+// These match the adapted shapes produced by SchedulePage's adapter functions.
+export interface CalendarSlot {
+  id?: string;
+  start: string;
+  end: string;
+  status: string;
+  identifier?: { system?: string; value?: string }[];
+  [key: string]: any;
+}
+
+export interface CalendarAppointment {
+  id?: string;
+  start: string;
+  end: string;
+  status?: string;
+  participant?: { actor?: { display?: string; reference?: string } }[];
+  [key: string]: any;
+}
+
+type AppointmentEvent = Event & { type: 'appointment'; appointment: CalendarAppointment; start: Date; end: Date };
+type SlotEvent = Event & { type: 'slot'; slot: CalendarSlot; status: string; start: Date; end: Date };
 type ScheduleEvent = AppointmentEvent | SlotEvent;
 
 export const CalendarToolbar = (props: ToolbarProps<ScheduleEvent>): JSX.Element => {
   const [firstRender, setFirstRender] = useState(true);
   useEffect(() => {
-    // The calendar does not provide any way to receive the range of dates that
-    // are visible except when they change. This is the cleanest way I could find
-    // to extend it to provide the _initial_ range (`onView` calls `onRangeChange`).
-    // https://github.com/jquense/react-big-calendar/issues/1752#issuecomment-761051235
     if (firstRender) {
       props.onView(props.view);
       setFirstRender(false);
@@ -67,33 +81,35 @@ export const CalendarToolbar = (props: ToolbarProps<ScheduleEvent>): JSX.Element
   );
 };
 
-function appointmentsToEvents(appointments: Appointment[]): AppointmentEvent[] {
+function isTransientSlot(slot: CalendarSlot): boolean {
+  return !!slot.identifier?.some((id) => id.system === 'urn:scheduling-transient');
+}
+
+function appointmentsToEvents(appointments: CalendarAppointment[]): AppointmentEvent[] {
   return appointments
     .filter((appointment) => appointment.status !== 'cancelled' && appointment.start && appointment.end)
     .map((appointment) => {
-      // Find the patient among the participants to use as title
-      const patientParticipant = appointment.participant.find((p) => p.actor?.reference?.startsWith('Patient/'));
+      const patientParticipant = appointment.participant?.find((p) => p.actor?.reference?.startsWith('Patient/'));
       const status = !['booked', 'arrived', 'fulfilled'].includes(appointment.status as string)
         ? ` (${appointment.status})`
         : '';
 
-      const name = patientParticipant ? patientParticipant.actor?.display : 'No Patient';
+      const name = patientParticipant ? patientParticipant.actor?.display : 'Appointment';
 
       return {
-        type: 'appointment',
+        type: 'appointment' as const,
         appointment,
-        title: `${name} ${status}`,
-        start: new Date(appointment.start as string),
-        end: new Date(appointment.end as string),
+        title: `${name ?? 'Appointment'} ${status}`,
+        start: new Date(appointment.start),
+        end: new Date(appointment.end),
         resource: appointment,
       };
     });
 }
 
-// This function collapses contiguous or overlapping slots of the same status into single events
-function slotsToEvents(slots: Slot[]): SlotEvent[] {
+function slotsToEvents(slots: CalendarSlot[]): SlotEvent[] {
   return slots.map((slot) => ({
-    type: 'slot',
+    type: 'slot' as const,
     slot,
     status: slot.status,
     resource: slot,
@@ -130,12 +146,12 @@ function eventPropGetter(
 }
 
 export function Calendar(props: {
-  slots: Slot[];
-  appointments: Appointment[];
+  slots: CalendarSlot[];
+  appointments: CalendarAppointment[];
   style?: React.CSSProperties;
   onSelectInterval?: (slotInfo: SlotInfo) => void;
-  onSelectSlot?: (slot: Slot) => void;
-  onSelectAppointment?: (appointment: Appointment) => void;
+  onSelectSlot?: (slot: CalendarSlot) => void;
+  onSelectAppointment?: (appointment: CalendarAppointment) => void;
   onRangeChange?: (range: Range) => void;
 }): JSX.Element {
   const [view, setView] = useState<View>('week');
@@ -148,18 +164,15 @@ export function Calendar(props: {
       let newStart: Date;
       let newEnd: Date;
       if (Array.isArray(newRange)) {
-        // Week view passes the range as an array of dates
         newStart = newRange[0];
         newEnd = dayjs(newRange[newRange.length - 1])
           .add(1, 'day')
           .toDate();
       } else {
-        // Other views pass the range as an object
         newStart = newRange.start;
         newEnd = newRange.end;
       }
 
-      // Only update state if the range has changed
       if (newStart.getTime() !== range?.start.getTime() || newEnd.getTime() !== range.end.getTime()) {
         setRange({ start: newStart, end: newEnd });
         onRangeChange?.({ start: newStart, end: newEnd });
@@ -183,10 +196,10 @@ export function Calendar(props: {
 
   const events = [
     ...appointmentsToEvents(props.appointments),
-    ...slotsToEvents(props.slots.filter((slot) => SchedulingTransientIdentifier.get(slot))),
+    ...slotsToEvents(props.slots.filter((slot) => isTransientSlot(slot))),
   ];
 
-  const backgroundEvents = slotsToEvents(props.slots.filter((slot) => !SchedulingTransientIdentifier.get(slot)));
+  const backgroundEvents = slotsToEvents(props.slots.filter((slot) => !isTransientSlot(slot)));
 
   return (
     <ReactBigCalendar
@@ -195,7 +208,6 @@ export function Calendar(props: {
       date={date}
       localizer={dayjsLocalizer(dayjs)}
       events={events}
-      // Background events don't show in the month view
       backgroundEvents={backgroundEvents}
       onNavigate={(newDate: Date, newView: View) => {
         setDate(newDate);
@@ -205,7 +217,6 @@ export function Calendar(props: {
       onSelectSlot={props.onSelectInterval}
       onSelectEvent={handleSelectEvent}
       onView={setView}
-      // Default scroll to current time
       scrollToTime={date}
       selectable
       eventPropGetter={eventPropGetter}

@@ -1,18 +1,35 @@
-// SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
-// SPDX-License-Identifier: Apache-2.0
-import type { OperationOutcome, Patient } from '@medplum/fhirtypes';
-import { useResource } from '@medplum/react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router';
+import { patientService } from '../services/patient.service';
+import type { Tables } from '../lib/supabase/types';
+
+type Patient = Tables<'patients'>;
 
 type Options = {
   ignoreMissingPatientId?: boolean;
-  setOutcome?: (outcome: OperationOutcome) => void;
 };
 
 export function usePatient(options?: Options): Patient | undefined {
   const { patientId } = useParams();
+  const [patient, setPatient] = useState<Patient | undefined>();
+
   if (!patientId && !options?.ignoreMissingPatientId) {
     throw new Error('Patient ID not found');
   }
-  return useResource<Patient>({ reference: `Patient/${patientId}` }, options?.setOutcome);
+
+  const fetch = useCallback(async () => {
+    if (!patientId) return;
+    try {
+      const result = await patientService.getById(patientId);
+      setPatient(result);
+    } catch (err) {
+      console.error('Failed to load patient:', err);
+    }
+  }, [patientId]);
+
+  useEffect(() => {
+    fetch();
+  }, [fetch]);
+
+  return patient;
 }

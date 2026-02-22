@@ -1,36 +1,61 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Box, Button, Card, Grid, Modal, Stack, Text, Textarea } from '@mantine/core';
+import { Autocomplete, Box, Button, Card, Grid, Loader, Modal, Select, Stack, Text, Textarea } from '@mantine/core';
+import { DateTimePicker } from '@mantine/dates';
 import { notifications } from '@mantine/notifications';
-import { createReference, formatHumanName, normalizeErrorString } from '@medplum/core';
-import type { Practitioner, Reference, Task } from '@medplum/fhirtypes';
-import { CodeInput, DateTimeInput, Loading, ResourceInput, useMedplum, useMedplumProfile } from '@medplum/react';
 import { IconCircleCheck, IconCircleOff } from '@tabler/icons-react';
 import type { JSX } from 'react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
+import type { Tables } from '../../lib/supabase/types';
+import { supabase } from '../../lib/supabase/client';
+import { formatHumanName, formatPatientName, normalizeErrorString } from '../../lib/utils';
+import { taskService } from '../../services/task.service';
 import { usePatient } from '../../hooks/usePatient';
+import { useCurrentUser } from '../../providers/AuthProvider';
 import classes from './TaskDetailsModal.module.css';
+
+type Task = Tables<'tasks'>;
+type Practitioner = Tables<'practitioners'>;
+
+const TASK_STATUS_OPTIONS = [
+  { value: 'draft', label: 'Draft' },
+  { value: 'requested', label: 'Requested' },
+  { value: 'received', label: 'Received' },
+  { value: 'accepted', label: 'Accepted' },
+  { value: 'rejected', label: 'Rejected' },
+  { value: 'ready', label: 'Ready' },
+  { value: 'in-progress', label: 'In Progress' },
+  { value: 'on-hold', label: 'On Hold' },
+  { value: 'failed', label: 'Failed' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'cancelled', label: 'Cancelled' },
+];
 
 export const TaskDetailsModal = (): JSX.Element => {
   const { patientId, encounterId, taskId } = useParams();
   const patient = usePatient();
-  const medplum = useMedplum();
   const navigate = useNavigate();
-  const author = useMedplumProfile();
+  const currentUser = useCurrentUser();
   const [task, setTask] = useState<Task | undefined>(undefined);
   const [isOpened, setIsOpened] = useState(true);
-  const [practitioner, setPractitioner] = useState<Practitioner | undefined>();
-  const [dueDate, setDueDate] = useState<string | undefined>();
-  const [status, setStatus] = useState<Task['status'] | undefined>();
+  const [selectedOwnerId, setSelectedOwnerId] = useState<string | undefined>();
+  const [ownerSearchValue, setOwnerSearchValue] = useState<string>('');
+  const [practitionerOptions, setPractitionerOptions] = useState<{ value: string; label: string }[]>([]);
+  const [dueDate, setDueDate] = useState<Date | null>(null);
+  const [status, setStatus] = useState<string | undefined>();
   const [note, setNote] = useState<string>('');
 
+  // Fetch task
   useEffect(() => {
     const fetchTask = async (): Promise<void> => {
-      const task = await medplum.readResource('Task', taskId as string);
-      setStatus(task.status as typeof status);
-      setTask(task);
-      setDueDate(task.restriction?.period?.end);
+      const result = await taskService.getById(taskId as string);
+      const t = result as Task;
+      setStatus(t.status);
+      setTask(t);
+      setSelectedOwnerId(t.owner_id ?? undefined);
+      // authored_on is available but restriction_period_end is not in schema;
+      // use authored_on as a sensible fallback for display purposes
     };
 
     fetchTask().catch((err) => {
@@ -41,55 +66,87 @@ export const TaskDetailsModal = (): JSX.Element => {
         message: normalizeErrorString(err),
       });
     });
-  }, [medplum, taskId]);
+  }, [taskId]);
+
+  // Load the current owner name when task loads
+  useEffect(() => {
+    const loadOwner = async (): Promise<void> => {
+      if (!task?.owner_id) return;
+      const { data } = await supabase
+        .from('practitioners')
+        .select('id, given_name, family_name')
+        .eq('id', task.owner_id)
+        .single();
+      if (data) {
+        setOwnerSearchValue(formatHumanName(data.given_name, data.family_name));
+      }
+    };
+    loadOwner().catch(console.error);
+  }, [task?.owner_id]);
+
+  // Search practitioners for the autocomplete
+  const searchPractitioners = useCallback(async (query: string): Promise<void> => {
+    if (query.length < 2) {
+      setPractitionerOptions([]);
+      return;
+    }
+    const { data } = await supabase
+      .from('practitioners')
+      .select('id, given_name, family_name')
+      .or(`given_name.ilike.%${query}%,family_name.ilike.%${query}%`)
+      .limit(10);
+
+    if (data) {
+      setPractitionerOptions(
+        data.map((p) => ({
+          value: p.id,
+          label: formatHumanName(p.given_name, p.family_name),
+        }))
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    searchPractitioners(ownerSearchValue).catch(console.error);
+  }, [ownerSearchValue, searchPractitioners]);
 
   const handleOnSubmit = async (): Promise<void> => {
     if (!task) {
       return;
     }
 
-    const updatedTask: Task = {
-      ...task,
-    };
+    const updatePayload: Record<string, any> = {};
 
+    if (status) {
+      updatePayload.status = status;
+    }
+
+    if (selectedOwnerId) {
+      updatePayload.owner_id = selectedOwnerId;
+    }
+
+    // Note: task.note is JSONB in the schema. Append to it if user typed a note.
     const trimmedNote = note.trim();
     if (trimmedNote !== '') {
-      updatedTask.note = [
-        ...(task.note || []),
+      const existingNotes = Array.isArray(task.note) ? task.note : [];
+      updatePayload.note = [
+        ...existingNotes,
         {
           text: trimmedNote,
-          authorReference: author && createReference(author),
+          author_id: currentUser?.id ?? null,
           time: new Date().toISOString(),
         },
       ];
     }
 
-    if (status) {
-      updatedTask.status = status;
-    }
-
-    if (dueDate) {
-      updatedTask.restriction = {
-        ...updatedTask.restriction,
-        period: {
-          ...updatedTask.restriction?.period,
-          end: dueDate,
-        },
-      };
-    }
-
-    if (practitioner) {
-      updatedTask.owner = createReference(practitioner) as Reference<Practitioner>;
-    }
-
     try {
-      await medplum.updateResource(updatedTask);
+      const updatedTask = await taskService.update(task.id, updatePayload);
       notifications.show({
         icon: <IconCircleCheck />,
         title: 'Success',
         message: 'Task updated',
       });
-      setTask(updatedTask);
+      setTask(updatedTask as Task);
       navigate(`/Patient/${patientId}/Encounter/${encounterId}`)?.catch(console.error);
     } catch {
       notifications.show({
@@ -102,7 +159,11 @@ export const TaskDetailsModal = (): JSX.Element => {
   };
 
   if (!task) {
-    return <Loading />;
+    return (
+      <Box p="xl" style={{ display: 'flex', justifyContent: 'center' }}>
+        <Loader />
+      </Box>
+    );
   }
 
   return (
@@ -128,48 +189,51 @@ export const TaskDetailsModal = (): JSX.Element => {
                 <Card p="md" radius="md" className={classes.taskDetails}>
                   <Stack gap="sm">
                     <Text fz="lg" fw={700}>
-                      {task?.code?.text}
+                      {(task.code as any)?.text}
                     </Text>
-                    {task?.description && <Text>{task.description}</Text>}
-                    {patient?.name && (
+                    {task.description && <Text>{task.description}</Text>}
+                    {patient && (
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                         <Text>View Patient</Text>
                         <Button variant="subtle" component={Link} to={`/Patient/${patient.id}`}>
-                          {formatHumanName(patient.name?.[0])}
+                          {formatPatientName(patient)}
                         </Button>
                       </div>
                     )}
                   </Stack>
                 </Card>
 
-                <ResourceInput<Practitioner>
-                  name="practitioner"
-                  resourceType="Practitioner"
+                <Autocomplete
                   label="Assigned to"
-                  defaultValue={task?.owner ? { reference: task.owner.reference } : undefined}
+                  placeholder="Search practitioners..."
+                  value={ownerSearchValue}
                   onChange={(value) => {
-                    setPractitioner(value as Practitioner);
+                    setOwnerSearchValue(value);
+                    // Find matching practitioner and set the id
+                    const match = practitionerOptions.find((p) => p.label === value);
+                    if (match) {
+                      setSelectedOwnerId(match.value);
+                    }
                   }}
+                  data={practitionerOptions.map((p) => p.label)}
                 />
 
-                <DateTimeInput
-                  name="Due Date"
-                  placeholder="End"
+                <DateTimePicker
                   label="Due Date"
-                  defaultValue={dueDate}
-                  onChange={setDueDate}
+                  placeholder="Select due date"
+                  value={dueDate}
+                  onChange={(value: string | null) => setDueDate(value ? new Date(value) : null)}
+                  clearable
                 />
 
-                {task?.status && (
-                  <CodeInput
-                    name="status"
+                {task.status && (
+                  <Select
                     label="Status"
-                    binding="http://hl7.org/fhir/ValueSet/task-status|4.0.1"
-                    maxValues={1}
-                    defaultValue={status}
+                    data={TASK_STATUS_OPTIONS}
+                    value={status}
                     onChange={(value) => {
                       if (value) {
-                        setStatus(value as typeof status);
+                        setStatus(value);
                       }
                     }}
                   />

@@ -1,116 +1,89 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type { DiagnosticReport, Encounter, Reference, ServiceRequest, Task } from '@medplum/fhirtypes';
-import { useMedplum, useResource } from '@medplum/react';
 import { useEffect, useState } from 'react';
 import type { JSX } from 'react';
-import { Button, Group, Modal, Stack, Text, Title } from '@mantine/core';
-import { getDisplayString } from '@medplum/core';
-import { IconPlus } from '@tabler/icons-react';
-import { OrderLabsPage } from '../../../pages/labs/OrderLabsPage';
-import type { LabOrganization, TestCoding } from '@medplum/health-gorilla-core';
-import { showErrorNotification } from '../../../utils/notifications';
+import { Alert, Box, Code, Loader, Stack, Text, Title } from '@mantine/core';
+import { IconAlertCircle } from '@tabler/icons-react';
+import type { Tables } from '../../../lib/supabase/types';
+import { serviceRequestService } from '../../../services/service-request.service';
 
 interface TaskServiceRequestProps {
-  task: Task;
-  saveDiagnosticReport: (diagnosticReport: DiagnosticReport) => void;
+  task: Tables<'tasks'>;
 }
-
-const SNOMED_SYSTEM = 'http://snomed.info/sct';
-const SNOMED_DIAGNOSTIC_REPORT_CODE = '108252007';
 
 export const TaskServiceRequest = (props: TaskServiceRequestProps): JSX.Element => {
   const { task } = props;
-  const medplum = useMedplum();
-  const serviceRequest = useResource(task.focus as Reference<ServiceRequest>);
-  const [newOrderModalOpened, setNewOrderModalOpened] = useState(false);
-  const [labServiceRequest, setLabServiceRequest] = useState<ServiceRequest | undefined>(undefined);
-  const performingLab: LabOrganization = {
-    resourceType: 'Organization',
-    id: '258a1dbb-ccec-4cb3-b9ff-4dc28f8f28a0',
-    name: 'HGDX LabCorp',
-    identifier: [
-      {
-        system: 'https://www.healthgorilla.com',
-        value: 'f-388554647b89801ea5e8320b',
-      },
-    ],
-  };
-
-  const tests: TestCoding[] | undefined = serviceRequest?.code?.coding
-    ?.filter((coding) => coding.system === SNOMED_SYSTEM && coding.code !== SNOMED_DIAGNOSTIC_REPORT_CODE)
-    .map((coding) => ({
-      system: 'urn:uuid:f:388554647b89801ea5e8320b',
-      code: coding.code,
-      display: coding.display,
-    })) as TestCoding[];
+  const [serviceRequest, setServiceRequest] = useState<Tables<'service_requests'> | undefined>(undefined);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     const fetchServiceRequest = async (): Promise<void> => {
-      const serviceRequest = await medplum.readReference(task.focus as Reference<ServiceRequest>);
-      setLabServiceRequest(serviceRequest);
+      if (task.focus_type !== 'ServiceRequest' || !task.focus_id) {
+        return;
+      }
+      const sr = await serviceRequestService.getById(task.focus_id);
+      setServiceRequest(sr as Tables<'service_requests'>);
     };
-    fetchServiceRequest().catch(showErrorNotification);
-  }, [medplum, task.focus]);
 
-  const handleNewOrderCreated = async (serviceRequest?: ServiceRequest): Promise<void> => {
-    setNewOrderModalOpened(false);
-    setLabServiceRequest(serviceRequest);
-  };
+    setLoading(true);
+    setError(undefined);
+    fetchServiceRequest()
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : 'Failed to load service request');
+      })
+      .finally(() => setLoading(false));
+  }, [task.focus_type, task.focus_id]);
 
-  if (!serviceRequest) {
-    return <div>Loading...</div>;
+  if (loading) {
+    return (
+      <Box p="md">
+        <Loader size="sm" />
+      </Box>
+    );
   }
 
+  if (error) {
+    return (
+      <Alert icon={<IconAlertCircle size={16} />} title="Error" color="red">
+        {error}
+      </Alert>
+    );
+  }
+
+  if (!serviceRequest) {
+    return (
+      <Box p="md">
+        <Text c="dimmed">No service request linked to this task.</Text>
+      </Box>
+    );
+  }
+
+  const taskTitle = (task.code as any)?.text || 'Service Request Task';
+
   return (
-    <>
-      <Stack p={0}>
-        <Stack gap={0}>
-          <Title>{getDisplayString(task)}</Title>
-        </Stack>
-
-        {(labServiceRequest?.status === 'draft' || labServiceRequest?.status === 'on-hold') && (
-          <Group>
-            <Button onClick={() => setNewOrderModalOpened(true)} variant="outline" leftSection={<IconPlus size={16} />}>
-              Request Labs
-            </Button>
-          </Group>
-        )}
-
-        {task.for &&
-          labServiceRequest?.status !== 'draft' &&
-          labServiceRequest?.status !== 'on-hold' &&
-          labServiceRequest?.id && (
-            <>
-              <Text> ✅ Order Sent | Requisition: {labServiceRequest?.requisition?.value} </Text>
-              <Group>
-                <Button
-                  component="a"
-                  target="_blank"
-                  href={`/${task.for.reference}/ServiceRequest/${labServiceRequest.id}`}
-                >
-                  View in Labs
-                </Button>
-              </Group>
-            </>
-          )}
+    <Stack p={0}>
+      <Stack gap={0}>
+        <Title order={4}>{taskTitle}</Title>
       </Stack>
 
-      <Modal
-        opened={newOrderModalOpened}
-        onClose={() => setNewOrderModalOpened(false)}
-        size="xl"
-        centered
-        title="Order Labs"
-      >
-        <OrderLabsPage
-          encounter={task.encounter as Reference<Encounter>}
-          task={task as Reference<Task>}
-          tests={tests}
-          performingLab={performingLab}
-          onSubmitLabOrder={handleNewOrderCreated}
-        />
-      </Modal>
-    </>
+      <Stack gap="sm">
+        <Text size="sm">
+          <Text component="span" fw={600}>Status:</Text> {serviceRequest.status}
+        </Text>
+        <Text size="sm">
+          <Text component="span" fw={600}>Intent:</Text> {serviceRequest.intent}
+        </Text>
+        {serviceRequest.code && (
+          <Box>
+            <Text size="sm" fw={600}>Code:</Text>
+            <Code block>{JSON.stringify(serviceRequest.code, null, 2)}</Code>
+          </Box>
+        )}
+        <Text c="dimmed" size="xs">
+          Lab ordering integration is not available in this POC. Service request details are shown for reference.
+        </Text>
+      </Stack>
+    </Stack>
   );
 };

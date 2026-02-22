@@ -1,11 +1,27 @@
-// SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
-// SPDX-License-Identifier: Apache-2.0
-import type { Encounter } from '@medplum/fhirtypes';
-import { useResource } from '@medplum/react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router';
+import { encounterService } from '../services/encounter.service';
+import type { Tables } from '../lib/supabase/types';
+
+type Encounter = Tables<'encounters'>;
 
 export function useEncounter(): Encounter | undefined {
   const { encounterId } = useParams();
+  const [encounter, setEncounter] = useState<Encounter | undefined>();
 
-  return useResource<Encounter>({ reference: `Encounter/${encounterId}` });
+  const fetch = useCallback(async () => {
+    if (!encounterId) return;
+    try {
+      const result = await encounterService.getById(encounterId);
+      setEncounter(result);
+    } catch (err) {
+      console.error('Failed to load encounter:', err);
+    }
+  }, [encounterId]);
+
+  useEffect(() => {
+    fetch();
+  }, [fetch]);
+
+  return encounter;
 }

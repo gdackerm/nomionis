@@ -1,32 +1,64 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Box, Button, Card, Grid, Modal, Stack, Text } from '@mantine/core';
+import { Autocomplete, Box, Button, Card, Grid, Modal, Select, Stack, Text, TextInput } from '@mantine/core';
+import { DateTimePicker } from '@mantine/dates';
 import { showNotification } from '@mantine/notifications';
-import { normalizeErrorString } from '@medplum/core';
-import type { Coding, Encounter, PlanDefinition } from '@medplum/fhirtypes';
-import { CodeInput, CodingInput, DateTimeInput, ResourceInput, useMedplum } from '@medplum/react';
 import { IconAlertSquareRounded, IconCircleCheck, IconCircleOff } from '@tabler/icons-react';
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { JSX } from 'react';
 import { useNavigate } from 'react-router';
 import { usePatient } from '../../hooks/usePatient';
-import classes from './EncounterModal.module.css';
+import { useAuth } from '../../providers/AuthProvider';
+import type { Tables } from '../../lib/supabase/types';
+import { planDefinitionService } from '../../services/plan-definition.service';
 import { createEncounter } from '../../utils/encounter';
+import classes from './EncounterModal.module.css';
+
+type PlanDefinition = Tables<'plan_definitions'>;
+
+const ENCOUNTER_CLASS_OPTIONS = [
+  { value: 'AMB', label: 'Ambulatory' },
+  { value: 'EMER', label: 'Emergency' },
+  { value: 'IMP', label: 'Inpatient' },
+  { value: 'OBSENC', label: 'Observation' },
+  { value: 'SS', label: 'Short Stay' },
+  { value: 'VR', label: 'Virtual' },
+  { value: 'HH', label: 'Home Health' },
+];
 
 export const EncounterModal = (): JSX.Element => {
   const navigate = useNavigate();
-  const medplum = useMedplum();
+  const { practitioner, organizationId } = useAuth();
   const patient = usePatient();
   const [isOpen, setIsOpen] = useState(true);
-  const [start, setStart] = useState<Date | undefined>();
-  const [end, setEnd] = useState<Date | undefined>();
-  const [encounterClass, setEncounterClass] = useState<Coding | undefined>();
-  const [planDefinitionData, setPlanDefinitionData] = useState<PlanDefinition | undefined>();
-  const [status, setStatus] = useState<Encounter['status'] | undefined>();
+  const [start, setStart] = useState<string | null>(null);
+  const [end, setEnd] = useState<string | null>(null);
+  const [encounterClass, setEncounterClass] = useState<string | null>(null);
+  const [selectedPlanDefinition, setSelectedPlanDefinition] = useState<PlanDefinition | undefined>();
+  const [planDefinitionSearch, setPlanDefinitionSearch] = useState('');
+  const [planDefinitions, setPlanDefinitions] = useState<PlanDefinition[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
+  const fetchPlanDefinitions = useCallback(async () => {
+    try {
+      const result = await planDefinitionService.list({
+        filters: { status: 'active' },
+        pageSize: 50,
+      });
+      setPlanDefinitions(result.data as PlanDefinition[]);
+    } catch (err) {
+      console.error('Failed to fetch plan definitions:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPlanDefinitions();
+  }, [fetchPlanDefinitions]);
+
+  const planDefinitionOptions = planDefinitions.map((pd) => pd.title ?? pd.id);
+
   const handleCreateEncounter = async (): Promise<void> => {
-    if (!patient || !encounterClass || !start || !end || !status || !planDefinitionData) {
+    if (!patient || !encounterClass || !start || !end || !organizationId || !practitioner) {
       showNotification({
         color: 'yellow',
         icon: <IconAlertSquareRounded />,
@@ -39,15 +71,28 @@ export const EncounterModal = (): JSX.Element => {
     setIsLoading(true);
 
     try {
-      const encounter = await createEncounter(medplum, start, end, encounterClass, patient, planDefinitionData);
+      const encounter = await createEncounter(
+        organizationId,
+        patient.id,
+        practitioner.id,
+        new Date(start),
+        new Date(end),
+        encounterClass,
+        selectedPlanDefinition?.id
+      );
       showNotification({ icon: <IconCircleCheck />, title: 'Success', message: 'Encounter created' });
       navigate(`/Patient/${patient.id}/Encounter/${encounter.id}`)?.catch(console.error);
     } catch (err) {
-      showNotification({ color: 'red', icon: <IconCircleOff />, title: 'Error', message: normalizeErrorString(err) });
+      const message = err instanceof Error ? err.message : String(err);
+      showNotification({ color: 'red', icon: <IconCircleOff />, title: 'Error', message });
     } finally {
       setIsLoading(false);
     }
   };
+
+  const patientDisplayName = patient
+    ? `${(patient.given_name ?? []).join(' ')} ${patient.family_name}`.trim()
+    : '';
 
   return (
     <Modal
@@ -65,52 +110,34 @@ export const EncounterModal = (): JSX.Element => {
           <Grid p="md" h="100%">
             <Grid.Col span={6} pr="md">
               <Stack gap="md">
-                <ResourceInput
-                  resourceType="Patient"
-                  name="Patient-id"
-                  defaultValue={patient}
+                <TextInput
+                  label="Patient"
+                  value={patientDisplayName}
                   disabled={true}
                   required={true}
                 />
 
-                <DateTimeInput
-                  name="start"
+                <DateTimePicker
                   label="Start Time"
                   required={true}
-                  onChange={(value) => {
-                    setStart(new Date(value));
-                  }}
+                  value={start}
+                  onChange={setStart}
                 />
 
-                <DateTimeInput
-                  name="end"
+                <DateTimePicker
                   label="End Time"
                   required={true}
-                  onChange={(value) => {
-                    setEnd(new Date(value));
-                  }}
+                  value={end}
+                  onChange={setEnd}
                 />
 
-                <CodingInput
-                  name="class"
+                <Select
                   label="Class"
-                  binding="http://terminology.hl7.org/ValueSet/v3-ActEncounterCode"
+                  data={ENCOUNTER_CLASS_OPTIONS}
                   required={true}
+                  value={encounterClass}
                   onChange={setEncounterClass}
-                  path="Encounter.type"
-                />
-
-                <CodeInput
-                  name="status"
-                  label="Status"
-                  binding="http://hl7.org/fhir/ValueSet/encounter-status|4.0.1"
-                  maxValues={1}
-                  required={true}
-                  onChange={(value) => {
-                    if (value) {
-                      setStatus(value as typeof status);
-                    }
-                  }}
+                  placeholder="Select encounter class"
                 />
               </Stack>
             </Grid.Col>
@@ -120,20 +147,25 @@ export const EncounterModal = (): JSX.Element => {
                 <Text size="md" fw={500} mb="xs">
                   Apply care template
                 </Text>
-                <Text size="sm" color="dimmed" mb="lg">
-                  You can select template for new encounter. Tasks from the template will be automatically added to the
-                  encounter. Administrators can create and edit templates in the{' '}
-                  <Text component="a" href="#" variant="link">
-                    Medplum app
-                  </Text>
-                  .
+                <Text size="sm" c="dimmed" mb="lg">
+                  You can select a template for the new encounter. Tasks from the template will be automatically added
+                  to the encounter.
                 </Text>
 
-                <ResourceInput
-                  name="plandefinition"
-                  resourceType="PlanDefinition"
-                  onChange={(value) => setPlanDefinitionData(value as PlanDefinition)}
-                  required={true}
+                <Autocomplete
+                  label="Care Template"
+                  placeholder="Search plan definitions..."
+                  data={planDefinitionOptions}
+                  value={planDefinitionSearch}
+                  onChange={(value) => {
+                    setPlanDefinitionSearch(value);
+                    const match = planDefinitions.find((pd) => (pd.title ?? pd.id) === value);
+                    setSelectedPlanDefinition(match);
+                  }}
+                  onOptionSubmit={(value) => {
+                    const match = planDefinitions.find((pd) => (pd.title ?? pd.id) === value);
+                    setSelectedPlanDefinition(match);
+                  }}
                 />
               </Card>
             </Grid.Col>

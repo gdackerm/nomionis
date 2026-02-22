@@ -1,25 +1,25 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { Box, Button, Stack, Text } from '@mantine/core';
-import type { Task } from '@medplum/fhirtypes';
 import type { JSX } from 'react';
+import type { Tables } from '../../../lib/supabase/types';
 
 interface SimpleTaskProps {
-  task: Task;
+  task: Tables<'tasks'>;
 }
 
 export const SimpleTask = ({ task }: SimpleTaskProps): JSX.Element => {
   return (
     <Box p="md">
       <Stack gap="xs">
-        {task.code?.text && (
+        {(task.code as any)?.text && (
           <Text fw={500} size="lg">
-            {task.code.text}
+            {(task.code as any).text}
           </Text>
         )}
         <Text>{task.description}</Text>
-        {task.focus?.reference?.startsWith('ServiceRequest/') && (
-          <Button component="a" href={`/${task.focus.reference}`} target="_blank">
+        {task.focus_type === 'ServiceRequest' && task.focus_id && (
+          <Button component="a" href={`/ServiceRequest/${task.focus_id}`} target="_blank">
             View Service Request
           </Button>
         )}

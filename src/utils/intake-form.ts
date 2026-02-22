@@ -1,233 +1,200 @@
-// SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
-// SPDX-License-Identifier: Apache-2.0
-import { addProfileToResource, append, createReference, EMPTY, getQuestionnaireAnswers } from '@medplum/core';
-import type { MedplumClient } from '@medplum/core';
-import type { Organization, Patient, Questionnaire, QuestionnaireResponse, Reference } from '@medplum/fhirtypes';
+import { getQuestionnaireAnswers } from '../lib/utils';
+import type { Tables } from '../lib/supabase/types';
+import { patientService } from '../services/patient.service';
 import {
   addAllergy,
   addCondition,
   addConsent,
   addCoverage,
-  addExtension,
   addFamilyMemberHistory,
   addImmunization,
-  addLanguage,
   addMedication,
-  addPharmacy,
+  buildCommunication,
+  buildExtensions,
   consentCategoryMapping,
   consentPolicyRuleMapping,
   consentScopeMapping,
   convertDateToDateTime,
-  extensionURLMapping,
   getGroupRepeatedAnswers,
   getHumanName,
   getPatientAddress,
   observationCategoryMapping,
   observationCodeMapping,
-  PROFILE_URLS,
   upsertObservation,
 } from './intake-utils';
+import type { IntakeAnswer } from './intake-utils';
+
+type Patient = Tables<'patients'>;
+
+interface QuestionnaireItem {
+  linkId: string;
+  type?: string;
+  item?: QuestionnaireItem[];
+}
+
+interface QuestionnaireResponseItem {
+  linkId: string;
+  answer?: IntakeAnswer[];
+  item?: QuestionnaireResponseItem[];
+}
+
+interface Questionnaire {
+  item?: QuestionnaireItem[];
+}
+
+interface QuestionnaireResponse {
+  item?: QuestionnaireResponseItem[];
+}
 
 export async function onboardPatient(
-  medplum: MedplumClient,
+  organizationId: string,
   questionnaire: Questionnaire,
   response: QuestionnaireResponse
 ): Promise<Patient> {
-  const answers = getQuestionnaireAnswers(response);
+  const answers = getQuestionnaireAnswers(response as any) as unknown as Record<string, IntakeAnswer>;
 
-  let patient: Patient = {
-    resourceType: 'Patient',
-  };
-
-  patient = addProfileToResource(patient, PROFILE_URLS.Patient);
-
-  // Handle demographic information
-
+  // Build patient data
   const patientName = getHumanName(answers);
-  if (patientName) {
-    patient.name = [patientName];
-  }
-
-  if (answers['dob']?.valueDate) {
-    patient.birthDate = answers['dob'].valueDate;
-  }
-
   const patientAddress = getPatientAddress(answers);
-  if (patientAddress) {
-    patient.address = [patientAddress];
-  }
+  const extensions = buildExtensions(answers);
+  const communication = buildCommunication(answers);
 
-  if (answers['gender-identity']?.valueCoding?.code) {
-    patient.gender = answers['gender-identity'].valueCoding.code as Patient['gender'];
-  }
+  const givenName = patientName?.given ?? [];
+  const familyName = patientName?.family ?? '';
 
-  if (answers['phone']?.valueString) {
-    patient.telecom = [{ system: 'phone', value: answers['phone'].valueString }];
-  }
+  // Extract phone
+  const phone = answers['phone']?.valueString ?? null;
 
-  if (answers['ssn']?.valueString) {
-    patient.identifier = [
-      {
-        type: {
-          coding: [
-            {
-              system: 'http://terminology.hl7.org/CodeSystem/v2-0203',
-              code: 'SS',
-            },
-          ],
-        },
-        system: 'http://hl7.org/fhir/sid/us-ssn',
-        value: answers['ssn'].valueString,
-      },
-    ];
-  }
+  // Extract SSN
+  const ssn = answers['ssn']?.valueString;
+  const ssnLast4 = ssn ? ssn.slice(-4) : null;
 
+  // Extract gender
+  const gender = answers['gender-identity']?.valueCoding?.code ?? null;
+
+  // Extract birth date
+  const birthDate = answers['dob']?.valueDate ?? null;
+
+  // Build contacts from emergency contacts
   const emergencyContacts = getGroupRepeatedAnswers(questionnaire, response, 'emergency-contact');
-  for (const contact of emergencyContacts ?? EMPTY) {
-    patient.contact = append(patient.contact, {
-      relationship: [
-        {
-          coding: [
-            {
-              system: 'http://terminology.hl7.org/CodeSystem/v2-0131',
-              code: 'EP',
-              display: 'Emergency contact person',
-            },
-          ],
-        },
-      ],
-      name: getHumanName(contact, 'emergency-contact-'),
-      telecom: [{ system: 'phone', value: contact['emergency-contact-phone']?.valueString }],
-    });
-  }
+  const contacts = emergencyContacts
+    .map((contact) => {
+      const name = getHumanName(contact, 'emergency-contact-');
+      return {
+        relationship: [{ coding: [{ system: 'http://terminology.hl7.org/CodeSystem/v2-0131', code: 'EP', display: 'Emergency contact person' }] }],
+        name,
+        telecom: contact['emergency-contact-phone']?.valueString
+          ? [{ system: 'phone', value: contact['emergency-contact-phone'].valueString }]
+          : undefined,
+      };
+    })
+    .filter((c) => c.name);
 
-  addExtension(patient, extensionURLMapping.race, 'valueCoding', answers['race'], 'ombCategory');
-  addExtension(patient, extensionURLMapping.ethnicity, 'valueCoding', answers['ethnicity'], 'ombCategory');
-  addExtension(patient, extensionURLMapping.veteran, 'valueBoolean', answers['veteran-status']);
-
-  addLanguage(patient, answers['languages-spoken']?.valueCoding);
-  addLanguage(patient, answers['preferred-language']?.valueCoding, true);
-
-  // Create the patient resource
-
-  patient = await medplum.createResource(patient);
-
-  // NOTE: Updating the questionnaire response does not trigger a loop because the bot subscription
-  // is configured for "create"-only event.
-  response.subject = createReference(patient);
-  await medplum.createResource(response);
+  // Create the patient
+  const patient = await patientService.create({
+    organization_id: organizationId,
+    given_name: givenName,
+    family_name: familyName,
+    gender,
+    birth_date: birthDate,
+    phone,
+    ssn_last4: ssnLast4,
+    address: patientAddress,
+    contacts: contacts.length > 0 ? contacts : null,
+    communication,
+    extensions,
+  });
 
   // Handle observations
-
   await upsertObservation(
-    medplum,
-    patient,
+    organizationId, patient.id,
     observationCodeMapping.sexualOrientation,
     observationCategoryMapping.socialHistory,
     'valueCodeableConcept',
-    answers['sexual-orientation']?.valueCoding,
-    PROFILE_URLS.ObservationSexualOrientation
+    answers['sexual-orientation']
   );
 
   await upsertObservation(
-    medplum,
-    patient,
+    organizationId, patient.id,
     observationCodeMapping.housingStatus,
     observationCategoryMapping.sdoh,
     'valueCodeableConcept',
-    answers['housing-status']?.valueCoding
+    answers['housing-status']
   );
 
   await upsertObservation(
-    medplum,
-    patient,
+    organizationId, patient.id,
     observationCodeMapping.educationLevel,
     observationCategoryMapping.sdoh,
     'valueCodeableConcept',
-    answers['education-level']?.valueCoding
+    answers['education-level']
   );
 
   await upsertObservation(
-    medplum,
-    patient,
+    organizationId, patient.id,
     observationCodeMapping.smokingStatus,
     observationCategoryMapping.socialHistory,
     'valueCodeableConcept',
-    answers['smoking-status']?.valueCoding,
-    PROFILE_URLS.ObservationSmokingStatus
+    answers['smoking-status']
   );
 
   await upsertObservation(
-    medplum,
-    patient,
+    organizationId, patient.id,
     observationCodeMapping.pregnancyStatus,
     observationCategoryMapping.socialHistory,
     'valueCodeableConcept',
-    answers['pregnancy-status']?.valueCoding
+    answers['pregnancy-status']
   );
 
   const estimatedDeliveryDate = convertDateToDateTime(answers['estimated-delivery-date']?.valueDate);
-  await upsertObservation(
-    medplum,
-    patient,
-    observationCodeMapping.estimatedDeliveryDate,
-    observationCategoryMapping.socialHistory,
-    'valueDateTime',
-    estimatedDeliveryDate ? { valueDateTime: estimatedDeliveryDate } : undefined
-  );
+  if (estimatedDeliveryDate) {
+    await upsertObservation(
+      organizationId, patient.id,
+      observationCodeMapping.estimatedDeliveryDate,
+      observationCategoryMapping.socialHistory,
+      'valueDateTime',
+      { valueDateTime: estimatedDeliveryDate }
+    );
+  }
 
   // Handle allergies
-
   const allergies = getGroupRepeatedAnswers(questionnaire, response, 'allergies');
   for (const allergy of allergies) {
-    await addAllergy(medplum, patient, allergy);
+    await addAllergy(organizationId, patient.id, allergy);
   }
 
   // Handle medications
-
   const medications = getGroupRepeatedAnswers(questionnaire, response, 'medications');
   for (const medication of medications) {
-    await addMedication(medplum, patient, medication);
+    await addMedication(organizationId, patient.id, medication);
   }
 
   // Handle medical history
-
   const medicalHistory = getGroupRepeatedAnswers(questionnaire, response, 'medical-history');
   for (const history of medicalHistory) {
-    await addCondition(medplum, patient, history);
+    await addCondition(organizationId, patient.id, history);
   }
 
   const familyMemberHistory = getGroupRepeatedAnswers(questionnaire, response, 'family-member-history');
   for (const history of familyMemberHistory) {
-    await addFamilyMemberHistory(medplum, patient, history);
+    await addFamilyMemberHistory(organizationId, patient.id, history);
   }
 
-  // Handle vaccination history (immunizations)
-
+  // Handle immunizations
   const vaccinationHistory = getGroupRepeatedAnswers(questionnaire, response, 'vaccination-history');
   for (const vaccine of vaccinationHistory) {
-    await addImmunization(medplum, patient, vaccine);
+    await addImmunization(organizationId, patient.id, vaccine);
   }
 
   // Handle coverage
-
   const insuranceProviders = getGroupRepeatedAnswers(questionnaire, response, 'coverage-information');
   for (const provider of insuranceProviders) {
-    await addCoverage(medplum, patient, provider);
-  }
-
-  // Handle preferred pharmacy
-
-  const preferredPharmacyReference = answers['preferred-pharmacy-reference']?.valueReference;
-  if (preferredPharmacyReference) {
-    await addPharmacy(medplum, patient, preferredPharmacyReference as Reference<Organization>);
+    await addCoverage(organizationId, patient.id, provider);
   }
 
   // Handle consents
-
   await addConsent(
-    medplum,
-    patient,
+    organizationId, patient.id,
     !!answers['consent-for-treatment-signature']?.valueBoolean,
     consentScopeMapping.treatment,
     consentCategoryMapping.med,
@@ -236,8 +203,7 @@ export async function onboardPatient(
   );
 
   await addConsent(
-    medplum,
-    patient,
+    organizationId, patient.id,
     !!answers['agreement-to-pay-for-treatment-help']?.valueBoolean,
     consentScopeMapping.treatment,
     consentCategoryMapping.pay,
@@ -246,8 +212,7 @@ export async function onboardPatient(
   );
 
   await addConsent(
-    medplum,
-    patient,
+    organizationId, patient.id,
     !!answers['notice-of-privacy-practices-signature']?.valueBoolean,
     consentScopeMapping.patientPrivacy,
     consentCategoryMapping.nopp,
@@ -256,8 +221,7 @@ export async function onboardPatient(
   );
 
   await addConsent(
-    medplum,
-    patient,
+    organizationId, patient.id,
     !!answers['acknowledgement-for-advance-directives-signature']?.valueBoolean,
     consentScopeMapping.adr,
     consentCategoryMapping.acd,

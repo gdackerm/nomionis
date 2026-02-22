@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { Divider, Stack } from '@mantine/core';
-import type { Communication } from '@medplum/fhirtypes';
+import type { Tables } from '../../lib/supabase/types';
 import { Fragment } from 'react';
 import type { JSX } from 'react';
 import { ChatListItem } from './ChatListItem';
+
+type Communication = Tables<'communications'>;
 
 interface ChatListProps {
   threads: [Communication, Communication | undefined][];

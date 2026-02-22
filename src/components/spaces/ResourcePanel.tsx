@@ -1,46 +1,41 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { Box, Text } from '@mantine/core';
-import type { Reference, Resource } from '@medplum/fhirtypes';
-import { PatientSummary, ResourceTable, useResource } from '@medplum/react';
 import type { JSX } from 'react';
+import type { Tables } from '../../lib/supabase/types';
 import { EncounterChart } from '../encounter/EncounterChart';
-import { LabOrderDetails } from '../labs/LabOrderDetails';
-import { LabResultDetails } from '../labs/LabResultDetails';
 import { TaskDetailPanel } from '../tasks/TaskDetailPanel';
 
-interface ResourcePanelProps<T extends Resource = Resource> {
-  resource: Reference<T> | T;
+type Task = Tables<'tasks'>;
+
+interface ResourcePanelProps {
+  resourceType?: string;
+  resourceId?: string;
+  task?: Task;
 }
 
-export function ResourcePanel<T extends Resource = Resource>(props: ResourcePanelProps<T>): JSX.Element | null {
-  const { resource } = props;
-  const displayResource = useResource(resource);
+export function ResourcePanel(props: ResourcePanelProps): JSX.Element | null {
+  const { resourceType, resourceId, task } = props;
 
-  const renderResourceContent = (): JSX.Element => {
-    if (!displayResource) {
-      return <Text c="dimmed">Loading resource...</Text>;
-    }
+  if (task) {
+    return (
+      <Box p="md" data-testid="resource-panel">
+        <TaskDetailPanel task={task} />
+      </Box>
+    );
+  }
 
-    switch (displayResource.resourceType) {
-      case 'Patient':
-        return <PatientSummary patient={displayResource} />;
-      case 'Task':
-        return <TaskDetailPanel task={displayResource} />;
-      case 'DiagnosticReport':
-        return <LabResultDetails result={displayResource} />;
-      case 'ServiceRequest':
-        return <LabOrderDetails order={displayResource} />;
-      case 'Encounter':
-        return <EncounterChart encounter={displayResource} />;
-      default:
-        return <ResourceTable value={displayResource} />;
-    }
-  };
+  if (resourceType === 'Encounter' && resourceId) {
+    return (
+      <Box p="md" data-testid="resource-panel">
+        <EncounterChart encounterId={resourceId} />
+      </Box>
+    );
+  }
 
   return (
     <Box p="md" data-testid="resource-panel">
-      {renderResourceContent()}
+      <Text c="dimmed">Resource panel not available</Text>
     </Box>
   );
 }

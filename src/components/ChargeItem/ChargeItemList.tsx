@@ -1,37 +1,41 @@
-// SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
+// SPDX-FileCopyrightText: Copyright Orangebot, Inc.
 // SPDX-License-Identifier: Apache-2.0
 import { Box, Button, Card, Flex, Modal, Stack, Text, TextInput } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import type { WithId } from '@medplum/core';
-import { createReference, HTTP_HL7_ORG } from '@medplum/core';
-import type { ChargeItem, ChargeItemDefinition, CodeableConcept, Encounter, Patient } from '@medplum/fhirtypes';
-import { AsyncAutocomplete, CodeableConceptInput, useMedplum } from '@medplum/react';
 import { IconPlus } from '@tabler/icons-react';
 import type { JSX } from 'react';
 import { useCallback, useEffect, useState } from 'react';
+import type { Tables, Json } from '../../lib/supabase/types';
+import { HTTP_HL7_ORG } from '../../lib/utils';
+import { chargeItemService } from '../../services/charge-item.service';
+import { useAuth } from '../../providers/AuthProvider';
 import { applyChargeItemDefinition, calculateTotalPrice } from '../../utils/chargeitems';
 import { showErrorNotification } from '../../utils/notifications';
 import ChargeItemPanel from './ChargeItemPanel';
 
+type ChargeItem = Tables<'charge_items'>;
+type Patient = Tables<'patients'>;
+type Encounter = Tables<'encounters'>;
+
 export interface ChargeItemListProps {
-  chargeItems: WithId<ChargeItem>[];
-  updateChargeItems: (chargeItems: WithId<ChargeItem>[]) => void;
-  patient: WithId<Patient>;
-  encounter: WithId<Encounter>;
+  chargeItems: ChargeItem[];
+  updateChargeItems: (chargeItems: ChargeItem[]) => void;
+  patient: Patient;
+  encounter: Encounter;
 }
 
 export const ChargeItemList = (props: ChargeItemListProps): JSX.Element => {
   const { chargeItems, updateChargeItems, patient, encounter } = props;
-  const [chargeItemsState, setChargeItemsState] = useState<WithId<ChargeItem>[]>(chargeItems);
+  const [chargeItemsState, setChargeItemsState] = useState<ChargeItem[]>(chargeItems);
   const [opened, { open, close }] = useDisclosure(false);
-  const medplum = useMedplum();
+  const { organizationId } = useAuth();
 
   useEffect(() => {
     setChargeItemsState(chargeItems);
   }, [chargeItems]);
 
   const updateChargeItemList = useCallback(
-    async (updatedChargeItem: WithId<ChargeItem>): Promise<void> => {
+    async (updatedChargeItem: ChargeItem): Promise<void> => {
       const updatedChargeItems = chargeItemsState.map((item) =>
         item.id === updatedChargeItem.id ? updatedChargeItem : item
       );
@@ -54,36 +58,42 @@ export const ChargeItemList = (props: ChargeItemListProps): JSX.Element => {
 
   const handleAddChargeItem = useCallback(
     async (
-      cptCode: CodeableConcept | undefined,
-      chargeItemDefinition: ChargeItemDefinition | undefined
+      cptCode: string,
+      cptDisplay: string,
+      definitionCanonical: string
     ): Promise<void> => {
-      if (!cptCode || !chargeItemDefinition) {
-        showErrorNotification('Please select both CPT code and charge item definition');
+      if (!cptCode) {
+        showErrorNotification('Please enter a CPT code');
+        return;
+      }
+
+      if (!organizationId) {
+        showErrorNotification('Organization not found');
         return;
       }
 
       try {
-        const newChargeItem: ChargeItem = {
-          resourceType: 'ChargeItem',
-          status: 'planned',
-          subject: createReference(patient),
-          context: createReference(encounter),
-          occurrenceDateTime: new Date().toISOString(),
-          extension: [
+        const code: Json = {
+          coding: [
             {
-              url: `${HTTP_HL7_ORG}/fhir/uv/order-catalog/StructureDefinition/ServiceBillingCode`,
-              valueCodeableConcept: cptCode,
+              system: 'http://www.ama-assn.org/go/cpt',
+              code: cptCode,
+              display: cptDisplay || cptCode,
             },
           ],
-          code: cptCode,
-          quantity: {
-            value: 1,
-          },
-          definitionCanonical: chargeItemDefinition.url ? [chargeItemDefinition.url] : [],
         };
 
-        const createdChargeItem = await medplum.createResource(newChargeItem);
-        const appliedChargeItem = await applyChargeItemDefinition(medplum, createdChargeItem);
+        const createdChargeItem = await chargeItemService.create({
+          organization_id: organizationId,
+          patient_id: patient.id,
+          encounter_id: encounter.id,
+          status: 'planned',
+          code,
+          quantity: 1,
+          definition_canonical: definitionCanonical || null,
+        });
+
+        const appliedChargeItem = await applyChargeItemDefinition(createdChargeItem as ChargeItem);
 
         updateChargeItems([...chargeItemsState, appliedChargeItem]);
         close();
@@ -91,7 +101,7 @@ export const ChargeItemList = (props: ChargeItemListProps): JSX.Element => {
         showErrorNotification(err);
       }
     },
-    [patient, encounter, chargeItemsState, updateChargeItems, medplum, close]
+    [patient, encounter, chargeItemsState, updateChargeItems, organizationId, close]
   );
 
   return (
@@ -143,96 +153,60 @@ export const ChargeItemList = (props: ChargeItemListProps): JSX.Element => {
 interface AddChargeItemModalProps {
   opened: boolean;
   onClose: () => void;
-  onSubmit: (cptCode: CodeableConcept | undefined, chargeItemDefinition: ChargeItemDefinition | undefined) => void;
+  onSubmit: (cptCode: string, cptDisplay: string, definitionCanonical: string) => void;
 }
 
 function AddChargeItemModal({ opened, onClose, onSubmit }: AddChargeItemModalProps): JSX.Element {
-  const medplum = useMedplum();
-  const [cptCode, setCptCode] = useState<CodeableConcept | undefined>();
-  const [chargeItemDefinition, setChargeItemDefinition] = useState<ChargeItemDefinition | undefined>();
-
-  const loadChargeItemDefinitions = useCallback(
-    async (input: string, signal: AbortSignal): Promise<ChargeItemDefinition[]> => {
-      const searchParams = new URLSearchParams({
-        title: input,
-        _count: '10',
-        status: 'active',
-      });
-
-      try {
-        const resources = await medplum.searchResources('ChargeItemDefinition', searchParams, { signal });
-        return resources;
-      } catch (error) {
-        if (!signal.aborted) {
-          console.error('Error searching ChargeItemDefinition:', error);
-        }
-        return [];
-      }
-    },
-    [medplum]
-  );
-
-  const handleSelectChargeItemDefinition = useCallback((items: unknown[]) => {
-    if (items.length > 0) {
-      setChargeItemDefinition(items[0] as ChargeItemDefinition);
-    }
-  }, []);
+  const [cptCode, setCptCode] = useState('');
+  const [cptDisplay, setCptDisplay] = useState('');
+  const [definitionCanonical, setDefinitionCanonical] = useState('');
 
   const handleSubmit = useCallback(() => {
-    onSubmit(cptCode, chargeItemDefinition);
+    onSubmit(cptCode, cptDisplay, definitionCanonical);
     // Clear all state
-    setCptCode(undefined);
-    setChargeItemDefinition(undefined);
-  }, [cptCode, chargeItemDefinition, onSubmit]);
+    setCptCode('');
+    setCptDisplay('');
+    setDefinitionCanonical('');
+  }, [cptCode, cptDisplay, definitionCanonical, onSubmit]);
 
   const handleClose = useCallback(() => {
     // Clear all state
-    setCptCode(undefined);
-    setChargeItemDefinition(undefined);
+    setCptCode('');
+    setCptDisplay('');
+    setDefinitionCanonical('');
     onClose();
   }, [onClose]);
 
   return (
     <Modal opened={opened} onClose={handleClose} title="Add Charge Item" size="md">
       <Stack gap="md">
-        <CodeableConceptInput
-          binding="http://www.ama-assn.org/go/cpt/vs"
+        <TextInput
           label="CPT Code"
-          name="cptCode"
-          path="ChargeItem.code"
-          placeholder="Search for CPT code..."
+          placeholder="Enter CPT code (e.g. 99213)"
           required
-          onChange={setCptCode}
+          value={cptCode}
+          onChange={(e) => setCptCode(e.currentTarget.value)}
         />
 
-        <Box>
-          <Text size="sm" fw={500} mb={5}>
-            Charge Item Definition{' '}
-            <Text span c="red">
-              *
-            </Text>
-          </Text>
-          <AsyncAutocomplete
-            placeholder="Search for charge item definition..."
-            onChange={handleSelectChargeItemDefinition}
-            toOption={(item: unknown) => {
-              const resource = item as ChargeItemDefinition;
-              return {
-                value: resource.id || '',
-                label: resource.title || resource.id || 'Untitled',
-                resource: resource,
-              };
-            }}
-            maxValues={1}
-            loadOptions={loadChargeItemDefinitions}
-          />
-        </Box>
+        <TextInput
+          label="CPT Code Display"
+          placeholder="Enter description for the CPT code"
+          value={cptDisplay}
+          onChange={(e) => setCptDisplay(e.currentTarget.value)}
+        />
+
+        <TextInput
+          label="Charge Item Definition URL"
+          placeholder="Enter definition canonical URL (optional)"
+          value={definitionCanonical}
+          onChange={(e) => setDefinitionCanonical(e.currentTarget.value)}
+        />
 
         <Flex justify="flex-end" gap="sm" mt="md">
           <Button variant="subtle" onClick={handleClose}>
             Cancel
           </Button>
-          <Button onClick={handleSubmit} disabled={!cptCode || !chargeItemDefinition}>
+          <Button onClick={handleSubmit} disabled={!cptCode}>
             Add Charge Item
           </Button>
         </Flex>

@@ -1,8 +1,23 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type { CodeableConcept, Patient, Reference, Task } from '@medplum/fhirtypes';
 
-export type TaskFilterValue = Reference<Patient> | Reference | CodeableConcept | string;
+export type TaskStatus =
+  | 'draft'
+  | 'requested'
+  | 'received'
+  | 'accepted'
+  | 'rejected'
+  | 'ready'
+  | 'in-progress'
+  | 'on-hold'
+  | 'failed'
+  | 'completed'
+  | 'cancelled'
+  | 'entered-in-error';
+
+export type TaskPriority = 'routine' | 'urgent' | 'asap' | 'stat';
+
+export type TaskFilterValue = string;
 
 export enum TaskFilterType {
   STATUS = 'status',
@@ -12,7 +27,7 @@ export enum TaskFilterType {
   PATIENT = 'patient',
 }
 
-export const TASK_STATUSES: Task['status'][] = [
+export const TASK_STATUSES: TaskStatus[] = [
   'draft',
   'requested',
   'received',
@@ -25,4 +40,4 @@ export const TASK_STATUSES: Task['status'][] = [
   'completed',
 ];
 
-export const TASK_PRIORITIES: Task['priority'][] = ['routine', 'urgent', 'asap', 'stat'];
+export const TASK_PRIORITIES: TaskPriority[] = ['routine', 'urgent', 'asap', 'stat'];

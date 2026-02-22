@@ -1,21 +1,21 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Box, Button, Divider, Grid, Modal, Stack, Text, TextInput, Textarea } from '@mantine/core';
+import { Autocomplete, Box, Button, Divider, Grid, Modal, Select, Stack, TextInput, Textarea } from '@mantine/core';
+import { DateTimePicker } from '@mantine/dates';
 import { notifications } from '@mantine/notifications';
-import { createReference, normalizeErrorString } from '@medplum/core';
-import type { CodeableConcept, Patient, Practitioner, Reference, Task } from '@medplum/fhirtypes';
-import {
-  CodeableConceptInput,
-  CodeInput,
-  DateTimeInput,
-  ReferenceInput,
-  ResourceInput,
-  useMedplum,
-  useMedplumProfile,
-} from '@medplum/react';
 import { IconCircleCheck, IconCircleOff } from '@tabler/icons-react';
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { JSX } from 'react';
+import type { Tables } from '../../lib/supabase/types';
+import { normalizeErrorString, formatPatientName, formatHumanName } from '../../lib/utils';
+import { useAuth, useCurrentUser } from '../../providers/AuthProvider';
+import { taskService } from '../../services/task.service';
+import { patientService } from '../../services/patient.service';
+import { supabase } from '../../lib/supabase/client';
+
+type Task = Tables<'tasks'>;
+type Patient = Tables<'patients'>;
+type Practitioner = Tables<'practitioners'>;
 
 export interface NewTaskModalProps {
   opened: boolean;
@@ -23,25 +23,92 @@ export interface NewTaskModalProps {
   onTaskCreated?: (task: Task) => void;
 }
 
+const STATUS_OPTIONS = [
+  { value: 'draft', label: 'Draft' },
+  { value: 'requested', label: 'Requested' },
+  { value: 'received', label: 'Received' },
+  { value: 'accepted', label: 'Accepted' },
+  { value: 'ready', label: 'Ready' },
+  { value: 'in-progress', label: 'In Progress' },
+  { value: 'on-hold', label: 'On Hold' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'cancelled', label: 'Cancelled' },
+];
+
 export function NewTaskModal(props: NewTaskModalProps): JSX.Element {
   const { opened, onClose, onTaskCreated } = props;
-  const medplum = useMedplum();
-  const profile = useMedplumProfile();
+  const { organizationId } = useAuth();
+  const currentUser = useCurrentUser();
 
   const [title, setTitle] = useState<string>('');
   const [description, setDescription] = useState<string>('');
   const [intent, setIntent] = useState<string>('order');
+  const [status, setStatus] = useState<string>('draft');
+  const [dueDate, setDueDate] = useState<Date | null>(null);
 
-  const [status, setStatus] = useState<Task['status']>('draft');
-  const [priority, setPriority] = useState<string>('routine');
-  const [assignee, setAssignee] = useState<Reference<Practitioner> | undefined>();
-  const [dueDate, setDueDate] = useState<string | undefined>();
-  const [taskPatient, setTaskPatient] = useState<Reference<Patient> | undefined>();
+  // Patient search
+  const [patientSearch, setPatientSearch] = useState<string>('');
+  const [patientOptions, setPatientOptions] = useState<{ value: string; label: string }[]>([]);
+  const [selectedPatientId, setSelectedPatientId] = useState<string | null>(null);
+  const [patients, setPatients] = useState<Patient[]>([]);
 
-  const [taskCode, setTaskCode] = useState<CodeableConcept | undefined>();
-  const [performerType, setPerformerType] = useState<CodeableConcept | undefined>();
+  // Assignee
+  const [assigneeOptions, setAssigneeOptions] = useState<{ value: string; label: string }[]>([]);
+  const [selectedAssigneeId, setSelectedAssigneeId] = useState<string | null>(null);
 
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+
+  // Load practitioners for assignee dropdown
+  useEffect(() => {
+    if (!opened || !organizationId) return;
+    supabase
+      .from('practitioners')
+      .select('*')
+      .eq('organization_id', organizationId)
+      .eq('active', true)
+      .then(({ data }) => {
+        if (data) {
+          setAssigneeOptions(
+            data.map((p: Practitioner) => ({
+              value: p.id,
+              label: formatHumanName(p.given_name, p.family_name),
+            }))
+          );
+        }
+      });
+  }, [opened, organizationId]);
+
+  // Search patients
+  const searchPatients = useCallback(
+    async (query: string) => {
+      if (query.length < 2) {
+        setPatientOptions([]);
+        setPatients([]);
+        return;
+      }
+      try {
+        const results = await patientService.search(query);
+        setPatients(results);
+        setPatientOptions(
+          results.map((p: Patient) => ({
+            value: p.id,
+            label: formatPatientName(p),
+          }))
+        );
+      } catch {
+        setPatientOptions([]);
+        setPatients([]);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      searchPatients(patientSearch);
+    }, 300);
+    return () => clearTimeout(timeout);
+  }, [patientSearch, searchPatients]);
 
   const handleSubmit = async (): Promise<void> => {
     if (!title.trim()) {
@@ -54,33 +121,30 @@ export function NewTaskModal(props: NewTaskModalProps): JSX.Element {
       return;
     }
 
+    if (!organizationId) {
+      notifications.show({
+        color: 'red',
+        icon: <IconCircleOff />,
+        title: 'Error',
+        message: 'No organization found',
+      });
+      return;
+    }
+
     setIsSubmitting(true);
 
     try {
-      const newTask: Task = {
-        resourceType: 'Task',
-        status: status,
-        intent: intent as Task['intent'],
-        priority: priority as Task['priority'],
-        code: taskCode || {
-          text: title,
-        },
-        description: description.trim() || undefined,
-        for: taskPatient,
-        authoredOn: new Date().toISOString(),
-        requester: profile ? createReference(profile) : undefined,
-        owner: assignee,
-        performerType: performerType ? [performerType] : undefined,
-        restriction: dueDate
-          ? {
-              period: {
-                end: dueDate,
-              },
-            }
-          : undefined,
-      };
-
-      const createdTask = await medplum.createResource(newTask);
+      const createdTask = await taskService.create({
+        organization_id: organizationId,
+        status,
+        intent,
+        code: { text: title },
+        description: description.trim() || null,
+        patient_id: selectedPatientId || null,
+        owner_id: selectedAssigneeId || null,
+        requester_id: currentUser?.id || null,
+        authored_on: new Date().toISOString(),
+      });
 
       notifications.show({
         icon: <IconCircleCheck />,
@@ -88,7 +152,7 @@ export function NewTaskModal(props: NewTaskModalProps): JSX.Element {
         message: 'Task created successfully',
       });
 
-      onTaskCreated?.(createdTask);
+      onTaskCreated?.(createdTask as Task);
       handleClose();
     } catch (error) {
       notifications.show({
@@ -107,12 +171,12 @@ export function NewTaskModal(props: NewTaskModalProps): JSX.Element {
     setDescription('');
     setIntent('order');
     setStatus('draft');
-    setPriority('routine');
-    setAssignee(undefined);
-    setDueDate(undefined);
-    setTaskCode(undefined);
-    setPerformerType(undefined);
-    setTaskPatient(undefined);
+    setDueDate(null);
+    setSelectedPatientId(null);
+    setSelectedAssigneeId(null);
+    setPatientSearch('');
+    setPatientOptions([]);
+    setPatients([]);
     setIsSubmitting(false);
     onClose();
   };
@@ -164,64 +228,45 @@ export function NewTaskModal(props: NewTaskModalProps): JSX.Element {
               <Stack gap="md" h="100%">
                 <Box>
                   <Stack gap="sm">
-                    <CodeInput
-                      name="status"
+                    <Select
                       label="Status"
-                      binding="http://hl7.org/fhir/ValueSet/task-status"
-                      maxValues={1}
-                      defaultValue={status}
-                      onChange={(value) => setStatus((value as Task['status']) || 'draft')}
+                      data={STATUS_OPTIONS}
+                      value={status}
+                      onChange={(value) => setStatus(value || 'draft')}
                       required
                     />
 
-                    <DateTimeInput
-                      name="dueDate"
+                    <DateTimePicker
                       label="Due Date"
                       placeholder="Select due date (optional)"
-                      defaultValue={dueDate}
-                      onChange={setDueDate}
+                      value={dueDate}
+                      onChange={(value: string | null) => setDueDate(value ? new Date(value) : null)}
+                      clearable
                     />
 
-                    <CodeInput
-                      name="priority"
-                      label="Priority"
-                      binding="http://hl7.org/fhir/ValueSet/request-priority"
-                      maxValues={1}
-                      defaultValue={priority}
-                      onChange={(value) => setPriority(value || 'routine')}
-                    />
-
-                    <ResourceInput<Patient>
-                      resourceType="Patient"
-                      name="patient"
+                    <Autocomplete
                       label="Patient"
-                      placeholder="Select patient"
-                      defaultValue={taskPatient}
-                      onChange={(value: Patient | undefined) =>
-                        setTaskPatient(value ? createReference(value) : undefined)
-                      }
+                      placeholder="Search for patient"
+                      value={patientSearch}
+                      onChange={(value) => {
+                        setPatientSearch(value);
+                        // Check if the user selected a known option
+                        const matched = patients.find(
+                          (p) => formatPatientName(p) === value
+                        );
+                        setSelectedPatientId(matched?.id || null);
+                      }}
+                      data={patientOptions.map((o) => o.label)}
                     />
 
-                    <Box>
-                      <Text size="sm" fw={500} mb="xs">
-                        Assignee
-                      </Text>
-                      <ReferenceInput
-                        name="assignee"
-                        targetTypes={['Practitioner', 'Organization']}
-                        placeholder="Select assignee (optional)"
-                        onChange={(value) => setAssignee(value as Reference<Practitioner>)}
-                      />
-                    </Box>
-
-                    <CodeableConceptInput
-                      name="performerType"
-                      label="Performer Type"
-                      placeholder="Select performer type (optional)"
-                      binding="http://hl7.org/fhir/ValueSet/performer-role"
-                      maxValues={1}
-                      onChange={(value) => setPerformerType(value as CodeableConcept)}
-                      path={'Task.performerType'}
+                    <Select
+                      label="Assignee"
+                      placeholder="Select assignee (optional)"
+                      data={assigneeOptions}
+                      value={selectedAssigneeId}
+                      onChange={setSelectedAssigneeId}
+                      clearable
+                      searchable
                     />
                   </Stack>
                 </Box>

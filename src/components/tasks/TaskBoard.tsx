@@ -19,46 +19,83 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react';
 import cx from 'clsx';
 import classes from './TaskBoard.module.css';
-import type { CodeableConcept, Task } from '@medplum/fhirtypes';
-import { Operator, parseSearchRequest } from '@medplum/core';
-import type { SearchRequest } from '@medplum/core';
+import type { Tables } from '../../lib/supabase/types';
 import { Link, useNavigate } from 'react-router';
-import { useMedplum } from '@medplum/react';
+import { taskService } from '../../services/task.service';
 import { showErrorNotification } from '../../utils/notifications';
 import { TaskFilterType } from './TaskFilterMenu.utils';
-import type { TaskFilterValue } from './TaskFilterMenu.utils';
+import type { TaskFilterValue, TaskStatus, TaskPriority } from './TaskFilterMenu.utils';
 import { TaskFilterMenu } from './TaskFilterMenu';
 import { IconPlus } from '@tabler/icons-react';
 import { TaskListItem } from './TaskListItem';
 import { TaskSelectEmpty } from './TaskSelectEmpty';
 import { NewTaskModal } from './NewTaskModal';
 import { TaskDetailPanel } from './TaskDetailPanel';
+import { supabase } from '../../lib/supabase/client';
 
-interface FilterState {
-  performerType: CodeableConcept | undefined;
+type Task = Tables<'tasks'>;
+
+/** Parsed filter/pagination state derived from the query string */
+interface ParsedSearch {
+  filters: Record<string, string>;
+  offset: number;
+  count: number;
+  orderBy?: string;
+  owner?: string;
+}
+
+/** The onChange callback now receives a simplified search descriptor instead of a Medplum SearchRequest */
+export interface TaskSearchDescriptor {
+  filters: Record<string, string>;
+  offset: number;
+  count: number;
+  owner?: string;
 }
 
 /**
  * TaskBoardProps is the props for the TaskBoard component.
- * @property query - The query string for the search request.
- * @property selectedTaskId - The ID of the selected task.
- * @property onDelete - The function to call when a task is deleted.
- * @property onNew - The function to call when a new task is created.
- * @property onChange - The function to call when the search request changes.
- * @property getTaskUri - The function to call to get the URI of a task.
- * @property myTasksUri - The URI for the my tasks search request.
- * @property allTasksUri - The URI for the all tasks search request.
- * @returns The TaskBoard component.
  */
 interface TaskBoardProps {
   query: string;
   selectedTaskId: string | undefined;
   onDelete: (task: Task) => void;
   onNew: (task: Task) => void;
-  onChange: (search: SearchRequest) => void;
+  onChange: (search: TaskSearchDescriptor) => void;
   getTaskUri: (task: Task) => string;
   myTasksUri: string;
   allTasksUri: string;
+}
+
+/** Parse a query string into our simplified search descriptor */
+function parseQuery(query: string): ParsedSearch {
+  const params = new URLSearchParams(query);
+  const filters: Record<string, string> = {};
+
+  for (const [key, value] of params.entries()) {
+    if (key === '_count' || key === '_offset' || key === '_sort') continue;
+    if (key === 'owner') continue;
+    filters[key] = value;
+  }
+
+  return {
+    filters,
+    offset: Number.parseInt(params.get('_offset') || '0', 10),
+    count: Number.parseInt(params.get('_count') || '20', 10),
+    orderBy: params.get('_sort') || undefined,
+    owner: params.get('owner') || undefined,
+  };
+}
+
+/** Convert a TaskSearchDescriptor back to a query-string-friendly format */
+function searchToQueryString(search: TaskSearchDescriptor): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(search.filters)) {
+    if (value) params.set(key, value);
+  }
+  if (search.owner) params.set('owner', search.owner);
+  if (search.offset) params.set('_offset', String(search.offset));
+  params.set('_count', String(search.count));
+  return params.toString();
 }
 
 export function TaskBoard({
@@ -71,20 +108,14 @@ export function TaskBoard({
   myTasksUri,
   allTasksUri,
 }: TaskBoardProps): JSX.Element {
-  const medplum = useMedplum();
   const navigate = useNavigate();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedTask, setSelectedTask] = useState<Task | undefined>(undefined);
   const [loading, setLoading] = useState<boolean>(false);
-  const [performerTypes, setPerformerTypes] = useState<CodeableConcept[]>([]);
   const [newTaskModalOpened, setNewTaskModalOpened] = useState<boolean>(false);
   const [total, setTotal] = useState<number | undefined>(undefined);
   const requestIdRef = useRef<number>(0);
   const fetchingRef = useRef<boolean>(false);
-
-  const [filters, setFilters] = useState<FilterState>({
-    performerType: undefined,
-  });
 
   // Parse pagination and status filters from query
   const searchParams = useMemo(() => new URLSearchParams(query), [query]);
@@ -93,39 +124,20 @@ export function TaskBoard({
   const currentPage = Math.floor(currentOffset / itemsPerPage) + 1;
   const isMyTasks = searchParams.has('owner');
 
-  // Parse current search from query string
-  const currentSearch = useMemo(() => parseSearchRequest(`Task?${query}`), [query]);
+  const currentSearch = useMemo(() => parseQuery(query), [query]);
 
   // Parse status filters from query string
   const selectedStatuses = useMemo(() => {
-    const statusFilters = currentSearch.filters?.filter((f) => f.code === 'status') || [];
-    const statuses: Task['status'][] = [];
-    statusFilters.forEach((filter) => {
-      const values = filter.value.split(',');
-      values.forEach((value) => {
-        const trimmedValue = value.trim();
-        if (trimmedValue && !statuses.includes(trimmedValue as Task['status'])) {
-          statuses.push(trimmedValue as Task['status']);
-        }
-      });
-    });
-    return statuses;
+    const statusParam = currentSearch.filters['status'];
+    if (!statusParam) return [] as string[];
+    return statusParam.split(',').map((s) => s.trim()).filter(Boolean);
   }, [currentSearch]);
 
   // Parse priority filters from query string
   const selectedPriorities = useMemo(() => {
-    const priorityFilters = currentSearch.filters?.filter((f) => f.code === 'priority') || [];
-    const priorities: Task['priority'][] = [];
-    priorityFilters.forEach((filter) => {
-      const values = filter.value.split(',');
-      values.forEach((value) => {
-        const trimmedValue = value.trim();
-        if (trimmedValue && !priorities.includes(trimmedValue as Task['priority'])) {
-          priorities.push(trimmedValue as Task['priority']);
-        }
-      });
-    });
-    return priorities;
+    const priorityParam = currentSearch.filters['priority'];
+    if (!priorityParam) return [] as string[];
+    return priorityParam.split(',').map((p) => p.trim()).filter(Boolean);
   }, [currentSearch]);
 
   const fetchTasks = useCallback(async (): Promise<void> => {
@@ -136,31 +148,39 @@ export function TaskBoard({
     const currentRequestId = ++requestIdRef.current;
 
     try {
-      const bundle = await medplum.search('Task', query, { cache: 'no-cache' });
+      // Build Supabase query
+      let q = supabase.from('tasks').select('*', { count: 'exact' });
+
+      // Apply owner filter
+      if (currentSearch.owner) {
+        q = q.eq('owner_id', currentSearch.owner);
+      }
+
+      // Apply status filter
+      if (selectedStatuses.length > 0) {
+        q = q.in('status', selectedStatuses);
+      }
+
+      // Apply pagination
+      const pageSize = currentSearch.count;
+      const offset = currentSearch.offset;
+      q = q.order('created_at', { ascending: false });
+      q = q.range(offset, offset + pageSize - 1);
+
+      const { data, error, count } = await q;
 
       if (currentRequestId !== requestIdRef.current) {
         return;
       }
 
-      let results: Task[] = [];
+      if (error) throw error;
 
-      if (bundle.entry) {
-        results = bundle.entry.map((entry) => entry.resource as Task).filter((r): r is Task => r !== undefined);
+      const results: Task[] = data ?? [];
+
+      if (count !== null && count !== undefined) {
+        setTotal(count);
       }
 
-      if (bundle.total !== undefined) {
-        setTotal(bundle.total);
-      }
-
-      const allPerformerTypes = results.flatMap((task) => task.performerType || []);
-
-      if (filters.performerType) {
-        results = results.filter(
-          (task) => task.performerType?.[0]?.coding?.[0]?.code === filters.performerType?.coding?.[0]?.code
-        );
-      }
-
-      setPerformerTypes(allPerformerTypes);
       setTasks(results);
     } catch (error) {
       if (currentRequestId === requestIdRef.current) {
@@ -169,7 +189,7 @@ export function TaskBoard({
     } finally {
       fetchingRef.current = false;
     }
-  }, [medplum, filters.performerType, query]);
+  }, [currentSearch, selectedStatuses, query]);
 
   useEffect(() => {
     setLoading(true);
@@ -194,12 +214,16 @@ export function TaskBoard({
   useEffect(() => {
     const handleTaskSelection = async (): Promise<void> => {
       if (selectedTaskId) {
-        const task = tasks.find((task: Task) => task.id === selectedTaskId);
+        const task = tasks.find((t: Task) => t.id === selectedTaskId);
         if (task) {
           setSelectedTask(task);
         } else {
-          const task = await medplum.readResource('Task', selectedTaskId);
-          setSelectedTask(task);
+          try {
+            const task = await taskService.getById(selectedTaskId);
+            setSelectedTask(task as Task);
+          } catch {
+            setSelectedTask(undefined);
+          }
         }
       } else {
         setSelectedTask(undefined);
@@ -209,7 +233,7 @@ export function TaskBoard({
     handleTaskSelection().catch(() => {
       setSelectedTask(undefined);
     });
-  }, [selectedTaskId, tasks, medplum, navigate]);
+  }, [selectedTaskId, tasks]);
 
   const handleNewTaskCreated = (task: Task): void => {
     fetchTasks().catch(showErrorNotification);
@@ -228,60 +252,45 @@ export function TaskBoard({
   const handleFilterChange = (filterType: TaskFilterType, value: TaskFilterValue): void => {
     switch (filterType) {
       case TaskFilterType.STATUS: {
-        const statusValue = value as Task['status'];
+        const statusValue = value as string;
         const newStatuses = selectedStatuses.includes(statusValue)
           ? selectedStatuses.filter((s) => s !== statusValue)
           : [...selectedStatuses, statusValue];
 
-        const otherFilters = currentSearch.filters?.filter((f) => f.code !== 'status') || [];
-        const newFilters = [...otherFilters];
-
+        const newFilters = { ...currentSearch.filters };
         if (newStatuses.length > 0) {
-          newFilters.push({
-            code: 'status',
-            operator: Operator.EQUALS,
-            value: newStatuses.join(','),
-          });
+          newFilters['status'] = newStatuses.join(',');
+        } else {
+          delete newFilters['status'];
         }
 
         onChange({
-          ...currentSearch,
           filters: newFilters,
           offset: 0,
+          count: currentSearch.count,
+          owner: currentSearch.owner,
         });
         break;
       }
       case TaskFilterType.PRIORITY: {
-        const priorityValue = value as Task['priority'];
+        const priorityValue = value as string;
         const newPriorities = selectedPriorities.includes(priorityValue)
           ? selectedPriorities.filter((p) => p !== priorityValue)
           : [...selectedPriorities, priorityValue];
 
-        const otherFilters = currentSearch.filters?.filter((f) => f.code !== 'priority') || [];
-        const newFilters = [...otherFilters];
-
+        const newFilters = { ...currentSearch.filters };
         if (newPriorities.length > 0) {
-          newFilters.push({
-            code: 'priority',
-            operator: Operator.EQUALS,
-            value: newPriorities.join(','),
-          });
+          newFilters['priority'] = newPriorities.join(',');
+        } else {
+          delete newFilters['priority'];
         }
 
         onChange({
-          ...currentSearch,
           filters: newFilters,
           offset: 0,
+          count: currentSearch.count,
+          owner: currentSearch.owner,
         });
-        break;
-      }
-      case TaskFilterType.PERFORMER_TYPE: {
-        const performerTypeCode = filters.performerType?.coding?.[0]?.code;
-        const valueCode = (value as CodeableConcept)?.coding?.[0]?.code;
-        setFilters((prev) => ({
-          ...prev,
-          performerType: performerTypeCode !== valueCode ? (value as CodeableConcept) : undefined,
-        }));
         break;
       }
       default:
@@ -318,10 +327,8 @@ export function TaskBoard({
                   </Button>
 
                   <TaskFilterMenu
-                    statuses={selectedStatuses}
-                    priorities={selectedPriorities}
-                    performerType={filters.performerType}
-                    performerTypes={performerTypes}
+                    statuses={selectedStatuses as TaskStatus[]}
+                    priorities={selectedPriorities as TaskPriority[]}
                     onFilterChange={handleFilterChange}
                   />
                 </Group>
@@ -356,7 +363,10 @@ export function TaskBoard({
                         const offset = (page - 1) * itemsPerPage;
                         onChange({
                           ...currentSearch,
+                          filters: currentSearch.filters,
                           offset,
+                          count: currentSearch.count,
+                          owner: currentSearch.owner,
                         });
                       }}
                       size="sm"

@@ -3,13 +3,14 @@
 import { Card, Stack } from '@mantine/core';
 import { useDebouncedCallback } from '@mantine/hooks';
 import { showNotification } from '@mantine/notifications';
-import type { MedplumClient, WithId } from '@medplum/core';
-import { createReference, normalizeErrorString } from '@medplum/core';
-import type { DiagnosticReport, QuestionnaireResponse, Task } from '@medplum/fhirtypes';
-import { useMedplum } from '@medplum/react';
 import { IconCircleOff } from '@tabler/icons-react';
 import type { JSX } from 'react';
 import { useNavigate } from 'react-router';
+import type { Tables } from '../../../lib/supabase/types';
+import { normalizeErrorString } from '../../../lib/utils';
+import { questionnaireResponseService } from '../../../services/questionnaire-response.service';
+import { taskService } from '../../../services/task.service';
+import { useAuth } from '../../../providers/AuthProvider';
 import { SAVE_TIMEOUT_MS } from '../../../config/constants';
 import { SimpleTask } from './SimpleTask';
 import { TaskQuestionnaireForm } from './TaskQuestionnaireForm';
@@ -17,45 +18,41 @@ import { TaskServiceRequest } from './TaskServiceRequest';
 import { TaskStatusPanel } from './TaskStatusPanel';
 
 interface TaskPanelProps {
-  task: WithId<Task>;
+  task: Tables<'tasks'>;
   enabled?: boolean;
-  onUpdateTask: (task: WithId<Task>) => void;
+  onUpdateTask: (task: Tables<'tasks'>) => void;
 }
 
 export const TaskPanel = (props: TaskPanelProps): JSX.Element => {
   const { task, enabled = true, onUpdateTask } = props;
   const navigate = useNavigate();
-  const medplum = useMedplum();
+  const { organizationId } = useAuth();
 
   const onActionButtonClicked = async (): Promise<void> => {
     navigate(`Task/${task.id}`)?.catch(console.error);
   };
 
-  const onChangeResponse = (response: QuestionnaireResponse): void => {
+  const onChangeResponse = (response: Tables<'questionnaire_responses'>): void => {
     saveQuestionnaireResponse(task, response);
   };
 
-  const onSaveDiagnosticReport = (diagnosticReport: DiagnosticReport): void => {
-    saveDiagnosticReport(task, diagnosticReport);
-  };
-
   const saveQuestionnaireResponse = useDebouncedCallback(
-    async (task: Task, response: QuestionnaireResponse): Promise<void> => {
+    async (task: Tables<'tasks'>, response: Tables<'questionnaire_responses'>): Promise<void> => {
       try {
         if (response.id) {
-          await medplum.updateResource<QuestionnaireResponse>(response);
-        } else {
-          const updatedResponse = await medplum.createResource<QuestionnaireResponse>(response);
-          const updatedTask = await medplum.updateResource<Task>({
-            ...task,
-            output: [
-              {
-                type: { text: 'QuestionnaireResponse' },
-                valueReference: createReference(updatedResponse),
-              },
-            ],
+          await questionnaireResponseService.update(response.id, {
+            items: response.items,
+            status: response.status,
           });
-          onUpdateTask(updatedTask);
+        } else {
+          await questionnaireResponseService.create({
+            organization_id: organizationId!,
+            questionnaire_id: task.focus_type === 'Questionnaire' ? task.focus_id : null,
+            patient_id: task.patient_id,
+            encounter_id: task.encounter_id,
+            status: response.status || 'in-progress',
+            items: response.items,
+          });
         }
       } catch (err) {
         console.error(err);
@@ -64,40 +61,35 @@ export const TaskPanel = (props: TaskPanelProps): JSX.Element => {
     SAVE_TIMEOUT_MS
   );
 
-  const saveDiagnosticReport = useDebouncedCallback(
-    async (task: Task, diagnosticReport: DiagnosticReport): Promise<void> => {
-      const updatedTask = await medplum.updateResource<Task>({
-        ...task,
-        output: [
-          {
-            type: { text: 'DiagnosticReport' },
-            valueReference: createReference(diagnosticReport),
-          },
-        ],
+  const onChangeStatus = async (status: string): Promise<void> => {
+    try {
+      const updatedTask = await taskService.update(task.id, { status });
+      onUpdateTask(updatedTask as Tables<'tasks'>);
+    } catch (err) {
+      showNotification({
+        color: 'red',
+        icon: <IconCircleOff />,
+        title: 'Error',
+        message: normalizeErrorString(err),
       });
-      onUpdateTask(updatedTask);
-    },
-    SAVE_TIMEOUT_MS
-  );
-
-  const onChangeStatus = async (status: Task[`status`]): Promise<void> => {
-    const updatedTask: WithId<Task> = { ...task, status: status };
-    await updateTaskStatus(updatedTask, medplum, onUpdateTask);
+    }
   };
+
+  const isQuestionnaire = task.focus_type === 'Questionnaire';
+  const isServiceRequest = task.focus_type === 'ServiceRequest';
 
   return (
     <Card withBorder shadow="sm" p={0}>
       <Stack gap="xs">
         <Stack p="md">
-          {task.focus?.reference?.startsWith('Questionnaire/') && (
+          {isQuestionnaire && (
             <TaskQuestionnaireForm key={task.id} task={task} onChangeResponse={onChangeResponse} />
           )}
-          {task.focus?.reference?.startsWith('ServiceRequest/') && (
-            <TaskServiceRequest key={task.id} task={task} saveDiagnosticReport={onSaveDiagnosticReport} />
+          {isServiceRequest && (
+            <TaskServiceRequest key={task.id} task={task} />
           )}
 
-          {!task.focus?.reference?.startsWith('ServiceRequest/') &&
-            !task.focus?.reference?.startsWith('Questionnaire/') && <SimpleTask key={task.id} task={task} />}
+          {!isServiceRequest && !isQuestionnaire && <SimpleTask key={task.id} task={task} />}
         </Stack>
         <TaskStatusPanel
           task={task}
@@ -108,22 +100,4 @@ export const TaskPanel = (props: TaskPanelProps): JSX.Element => {
       </Stack>
     </Card>
   );
-};
-
-const updateTaskStatus = async (
-  task: WithId<Task>,
-  medplum: MedplumClient,
-  onUpdateTask: (task: WithId<Task>) => void
-): Promise<void> => {
-  try {
-    const response = await medplum.updateResource(task);
-    onUpdateTask(response);
-  } catch (err) {
-    showNotification({
-      color: 'red',
-      icon: <IconCircleOff />,
-      title: 'Error',
-      message: normalizeErrorString(err),
-    });
-  }
 };

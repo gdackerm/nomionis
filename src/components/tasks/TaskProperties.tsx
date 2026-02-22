@@ -1,11 +1,29 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import type { PaperProps } from '@mantine/core';
-import { Divider, Flex, Paper, Stack, Text } from '@mantine/core';
-import { createReference } from '@medplum/core';
-import type { Organization, Patient, Practitioner, Reference, ResourceType, Task } from '@medplum/fhirtypes';
-import { CodeInput, DateTimeInput, ReferenceInput, ResourceInput } from '@medplum/react';
-import React, { useEffect, useState } from 'react';
+import { Autocomplete, Divider, Flex, Paper, Select, Stack, Text } from '@mantine/core';
+import { DateTimePicker } from '@mantine/dates';
+import React, { useCallback, useEffect, useState } from 'react';
+import type { Tables } from '../../lib/supabase/types';
+import { formatHumanName, formatPatientName } from '../../lib/utils';
+import { patientService } from '../../services/patient.service';
+import { supabase } from '../../lib/supabase/client';
+
+type Task = Tables<'tasks'>;
+type Patient = Tables<'patients'>;
+type Practitioner = Tables<'practitioners'>;
+
+const STATUS_OPTIONS = [
+  { value: 'draft', label: 'Draft' },
+  { value: 'requested', label: 'Requested' },
+  { value: 'received', label: 'Received' },
+  { value: 'accepted', label: 'Accepted' },
+  { value: 'ready', label: 'Ready' },
+  { value: 'in-progress', label: 'In Progress' },
+  { value: 'on-hold', label: 'On Hold' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'cancelled', label: 'Cancelled' },
+];
 
 interface TaskPropertiesProps extends PaperProps {
   task: Task;
@@ -14,128 +32,169 @@ interface TaskPropertiesProps extends PaperProps {
 
 export function TaskProperties(props: TaskPropertiesProps): React.JSX.Element {
   const { task: initialTask, onTaskChange, ...paperProps } = props;
-  const [task, setTask] = useState<Task | undefined>(initialTask);
-  const [dueDate, setDueDate] = useState<string | undefined>(task?.restriction?.period?.end);
+  const [task, setTask] = useState<Task>(initialTask);
+
+  // Patient search state
+  const [patientSearch, setPatientSearch] = useState<string>('');
+  const [patientOptions, setPatientOptions] = useState<string[]>([]);
+  const [patients, setPatients] = useState<Patient[]>([]);
+  const [currentPatient, setCurrentPatient] = useState<Patient | null>(null);
+
+  // Owner state
+  const [ownerOptions, setOwnerOptions] = useState<{ value: string; label: string }[]>([]);
+  const [currentOwnerId, setCurrentOwnerId] = useState<string | null>(task.owner_id);
 
   useEffect(() => {
     setTask(initialTask);
   }, [initialTask]);
 
-  const handleDueDateChange = async (value: string | undefined): Promise<void> => {
-    setDueDate(value);
-    await handleTaskUpdate({ ...task, restriction: { ...task?.restriction, period: { end: value } } } as Task);
-  };
+  // Load the current patient name
+  useEffect(() => {
+    if (task.patient_id) {
+      patientService.getById(task.patient_id).then((p) => {
+        setCurrentPatient(p as Patient);
+        setPatientSearch(formatPatientName(p as Patient));
+      }).catch(() => {
+        setCurrentPatient(null);
+        setPatientSearch('');
+      });
+    }
+  }, [task.patient_id]);
 
-  const handlePatientChange = async (value: Reference<Patient> | undefined): Promise<void> => {
-    await handleTaskUpdate({ ...task, for: value } as Task);
-  };
+  // Load practitioners for owner/assignee
+  useEffect(() => {
+    if (!task.organization_id) return;
+    supabase
+      .from('practitioners')
+      .select('*')
+      .eq('organization_id', task.organization_id)
+      .eq('active', true)
+      .then(({ data }) => {
+        if (data) {
+          setOwnerOptions(
+            data.map((p: Practitioner) => ({
+              value: p.id,
+              label: formatHumanName(p.given_name, p.family_name),
+            }))
+          );
+        }
+      });
+  }, [task.organization_id]);
 
-  const handlePriorityChange = async (value: string): Promise<void> => {
-    await handleTaskUpdate({ ...task, priority: value as Task['priority'] } as Task);
-  };
+  // Search patients with debounce
+  const searchPatients = useCallback(async (query: string) => {
+    if (query.length < 2) {
+      setPatientOptions([]);
+      setPatients([]);
+      return;
+    }
+    try {
+      const results = await patientService.search(query);
+      setPatients(results);
+      setPatientOptions(results.map((p: Patient) => formatPatientName(p)));
+    } catch {
+      setPatientOptions([]);
+      setPatients([]);
+    }
+  }, []);
 
-  const handleOwnerChange = async (value: Reference<Practitioner | Organization> | undefined): Promise<void> => {
-    await handleTaskUpdate({ ...task, owner: value } as Task);
-  };
-
-  const handleStatusChange = async (value: string | undefined): Promise<void> => {
+  const handleStatusChange = async (value: string | null): Promise<void> => {
     if (value) {
-      await handleTaskUpdate({ ...task, status: value as Task['status'] } as Task);
+      const updatedTask = { ...task, status: value };
+      setTask(updatedTask);
+      onTaskChange(updatedTask);
     }
   };
 
-  const handleTaskUpdate = async (value: Task): Promise<void> => {
-    onTaskChange(value);
+  const handleDueDateChange = async (value: string | null): Promise<void> => {
+    const updatedTask = { ...task } as any;
+    updatedTask.restriction_period_end = value ? new Date(value).toISOString() : null;
+    setTask(updatedTask as Task);
+    onTaskChange(updatedTask as Task);
   };
+
+  const handleOwnerChange = async (value: string | null): Promise<void> => {
+    setCurrentOwnerId(value);
+    const updatedTask = { ...task, owner_id: value };
+    setTask(updatedTask);
+    onTaskChange(updatedTask);
+  };
+
+  const handlePatientSearchChange = (value: string): void => {
+    setPatientSearch(value);
+    // Check if user selected a known patient
+    const matched = patients.find((p) => formatPatientName(p) === value);
+    if (matched) {
+      const updatedTask = { ...task, patient_id: matched.id };
+      setTask(updatedTask);
+      onTaskChange(updatedTask);
+    }
+  };
+
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      // Only search if the value doesn't match the current patient
+      if (currentPatient && patientSearch === formatPatientName(currentPatient)) return;
+      searchPatients(patientSearch);
+    }, 300);
+    return () => clearTimeout(timeout);
+  }, [patientSearch, searchPatients, currentPatient]);
+
+  const dueDate = (task as any).restriction_period_end
+    ? new Date((task as any).restriction_period_end)
+    : null;
 
   return (
     <Paper {...paperProps}>
       <Flex direction="column" gap="lg">
         <Stack gap="xs">
-          <CodeInput
-            key={`${task?.status}-${task?.id}`}
-            name="status"
+          <Select
+            key={`${task.status}-${task.id}`}
             label="Status"
-            binding="http://hl7.org/fhir/ValueSet/task-status"
-            maxValues={1}
-            defaultValue={task?.status}
+            data={STATUS_OPTIONS}
+            value={task.status}
             onChange={handleStatusChange}
           />
 
-          <DateTimeInput
-            name="Due Date"
-            placeholder="End"
+          <DateTimePicker
             label="Due Date"
-            defaultValue={dueDate}
+            placeholder="Select due date"
+            value={dueDate}
             onChange={handleDueDateChange}
+            clearable
           />
 
-          <Stack gap={0}>
-            <Text size="sm" fw={500}>
-              Assignee
-            </Text>
-            <ReferenceInput
-              name="owner"
-              targetTypes={['Practitioner', 'Organization']}
-              defaultValue={task?.owner ? { reference: task.owner.reference } : undefined}
-              onChange={async (value: Reference<Practitioner | Organization> | undefined) => {
-                await handleOwnerChange(value ? { reference: value.reference } : undefined);
-              }}
-            />
-          </Stack>
-
-          <CodeInput
-            name="priority"
-            label="Priority"
-            binding="http://hl7.org/fhir/ValueSet/request-priority"
-            maxValues={1}
-            defaultValue={task?.priority?.toString()}
-            onChange={(value: string | undefined) => handlePriorityChange(value ?? '')}
+          <Select
+            label="Assignee"
+            placeholder="Select assignee"
+            data={ownerOptions}
+            value={currentOwnerId}
+            onChange={handleOwnerChange}
+            clearable
+            searchable
           />
-
-          {task?.basedOn && task.basedOn.length > 0 ? (
-            <ResourceInput
-              label="Based On"
-              resourceType={task.basedOn[0].reference?.split('/').pop() as ResourceType}
-              name="basedOn-0"
-              defaultValue={task.basedOn[0]}
-              disabled
-            />
-          ) : (
-            <Stack gap={0}>
-              <Text size="sm" fw={500}>
-                Based On
-              </Text>
-              <ReferenceInput
-                name="basedOn"
-                placeholder="Select any resource..."
-                onChange={async (value: Reference | undefined) => {
-                  if (value?.reference) {
-                    const newBasedOn = [...(task?.basedOn || []), value];
-                    await handleTaskUpdate({ ...task, basedOn: newBasedOn } as Task);
-                  }
-                }}
-              />
-            </Stack>
-          )}
         </Stack>
 
         <Divider />
 
         <Stack gap="xs" pt="md">
-          <ResourceInput
+          <Autocomplete
             label="Patient"
-            resourceType="Patient"
-            name="patient"
             placeholder="Search for patient"
-            defaultValue={task?.for as Reference<Patient>}
-            onChange={async (patient: Patient | undefined) => {
-              await handlePatientChange(patient ? createReference(patient) : undefined);
-            }}
+            value={patientSearch}
+            onChange={handlePatientSearchChange}
+            data={patientOptions}
           />
 
-          {task?.encounter && (
-            <ResourceInput label="Encounter" resourceType="Encounter" name="encounter" defaultValue={task.encounter} />
+          {task.encounter_id && (
+            <Stack gap={0}>
+              <Text size="sm" fw={500}>
+                Encounter
+              </Text>
+              <Text size="sm" c="dimmed">
+                {task.encounter_id}
+              </Text>
+            </Stack>
           )}
         </Stack>
       </Flex>

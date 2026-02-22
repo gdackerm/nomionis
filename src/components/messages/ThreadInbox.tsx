@@ -17,54 +17,60 @@ import {
   Box,
   Pagination,
   Group,
+  TextInput,
+  Loader,
 } from '@mantine/core';
-import type { Communication, Patient, Practitioner, Reference } from '@medplum/fhirtypes';
-import { PatientSummary, ThreadChat } from '@medplum/react';
-import { useCallback, useEffect, useMemo } from 'react';
+import type { Tables } from '../../lib/supabase/types';
+import { PatientSummary } from '../PatientSummary';
+import { useCallback, useEffect, useState } from 'react';
 import type { JSX } from 'react';
-import { IconMessageCircle, IconChevronDown, IconPlus } from '@tabler/icons-react';
-import { getReferenceString, Operator, parseSearchRequest } from '@medplum/core';
-import type { SearchRequest } from '@medplum/core';
+import { IconMessageCircle, IconChevronDown, IconPlus, IconSend } from '@tabler/icons-react';
 import { ChatList } from './ChatList';
 import { NewTopicDialog } from './NewTopicDialog';
-import { ParticipantFilter } from './ParticipantFilter';
 import { useThreadInbox } from '../../hooks/useThreadInbox';
 import classes from './ThreadInbox.module.css';
 import { useDisclosure } from '@mantine/hooks';
 import { showErrorNotification } from '../../utils/notifications';
 import cx from 'clsx';
 import { Link } from 'react-router';
+import { communicationService } from '../../services/communication.service';
+import { patientService } from '../../services/patient.service';
+import { formatDateTime } from '../../lib/utils';
+import { useAuth } from '../../providers/AuthProvider';
+
+type Communication = Tables<'communications'>;
+type Patient = Tables<'patients'>;
 
 /**
  * ThreadInbox is a component that displays a list of threads and allows the user to select a thread to view.
- * @param query - The query to fetch all communications.
+ * @param filters - Filters to fetch communications.
  * @param threadId - The id of the thread to select.
- * @param subject - The default subject when creating a new thread.
+ * @param patientId - The default patient ID when creating a new thread.
  * @param showPatientSummary - Whether to show the patient summary.
  * @param onNew - A function to handle a new thread.
  * @param getThreadUri - A function to build thread URIs.
- * @param onChange - A function to handle search changes.
+ * @param onChange - A function to handle filter changes.
  * @param inProgressUri - The URI for in-progress threads.
  * @param completedUri - The URI for completed threads.
  */
 
 interface ThreadInboxProps {
-  query: string;
+  filters?: Record<string, unknown>;
   threadId: string | undefined;
-  subject?: Reference<Patient> | Patient | undefined;
+  patientId?: string | undefined;
   showPatientSummary?: boolean | undefined;
   onNew: (message: Communication) => void;
   getThreadUri: (topic: Communication) => string;
-  onChange: (search: SearchRequest) => void;
+  onChange: (filters: Record<string, unknown>) => void;
   inProgressUri: string;
   completedUri: string;
 }
 
 export function ThreadInbox(props: ThreadInboxProps): JSX.Element {
   const {
-    query,
+    filters,
     threadId,
-    subject,
+    patientId,
     showPatientSummary = false,
     onNew,
     getThreadUri,
@@ -75,25 +81,10 @@ export function ThreadInbox(props: ThreadInboxProps): JSX.Element {
 
   const [modalOpened, { open: openModal, close: closeModal }] = useDisclosure(false);
 
-  const currentSearch = useMemo(() => parseSearchRequest(`Communication?${query}`), [query]);
-
-  const searchParams = useMemo(() => new URLSearchParams(query), [query]);
-  const itemsPerPage = Number.parseInt(searchParams.get('_count') || '20', 10);
-  const currentOffset = Number.parseInt(searchParams.get('_offset') || '0', 10);
+  const itemsPerPage = (filters?._count as number) ?? 20;
+  const currentOffset = (filters?._offset as number) ?? 0;
   const currentPage = Math.floor(currentOffset / itemsPerPage) + 1;
-  const status = (searchParams.get('status') as Communication['status']) || 'in-progress';
-
-  // Extract participants from parsed search request filters (comma-separated)
-  const selectedParticipants = useMemo((): Reference<Patient | Practitioner>[] => {
-    const recipientFilters = currentSearch.filters?.filter((f) => f.code === 'recipient') ?? [];
-    // Split comma-separated values and flatten
-    return recipientFilters.flatMap((f) =>
-      f.value
-        .split(',')
-        .filter(Boolean)
-        .map((ref) => ({ reference: ref }) as Reference<Patient | Practitioner>)
-    );
-  }, [currentSearch]);
+  const status = (filters?.status as string) || 'in-progress';
 
   const {
     loading,
@@ -105,30 +96,23 @@ export function ThreadInbox(props: ThreadInboxProps): JSX.Element {
     addThreadMessage,
     refreshThreadMessages,
   } = useThreadInbox({
-    query,
+    filters,
     threadId,
   });
 
-  const handleParticipantsChange = useCallback(
-    (participants: Reference<Patient | Practitioner>[]) => {
-      // Remove existing recipient filters
-      const otherFilters = currentSearch.filters?.filter((f) => f.code !== 'recipient') ?? [];
+  // Patient data for the patient summary sidebar
+  const [sidebarPatient, setSidebarPatient] = useState<Patient | undefined>(undefined);
 
-      // Add recipient filter with comma-separated values (OR logic in FHIR)
-      const participantRefs = participants.map((p) => p.reference).filter(Boolean) as string[];
-      const newFilters =
-        participantRefs.length > 0
-          ? [...otherFilters, { code: 'recipient', operator: Operator.EQUALS, value: participantRefs.join(',') }]
-          : otherFilters;
-
-      onChange({
-        ...currentSearch,
-        filters: newFilters,
-        offset: 0, // Reset to first page when filter changes
-      });
-    },
-    [currentSearch, onChange]
-  );
+  useEffect(() => {
+    if (selectedThread?.patient_id && showPatientSummary) {
+      patientService
+        .getById(selectedThread.patient_id)
+        .then((p) => setSidebarPatient(p as Patient))
+        .catch(console.error);
+    } else {
+      setSidebarPatient(undefined);
+    }
+  }, [selectedThread?.patient_id, showPatientSummary]);
 
   useEffect(() => {
     if (error) {
@@ -136,7 +120,7 @@ export function ThreadInbox(props: ThreadInboxProps): JSX.Element {
     }
   }, [error]);
 
-  const handleTopicStatusChangeWithErrorHandling = async (newStatus: Communication['status']): Promise<void> => {
+  const handleTopicStatusChangeWithErrorHandling = async (newStatus: string): Promise<void> => {
     try {
       await handleThreadStatusChange(newStatus);
       await refreshThreadMessages();
@@ -181,10 +165,6 @@ export function ThreadInbox(props: ThreadInboxProps): JSX.Element {
                     >
                       Completed
                     </Button>
-                    <ParticipantFilter
-                      selectedParticipants={selectedParticipants}
-                      onFilterChange={handleParticipantsChange}
-                    />
                   </Group>
                   <ActionIcon radius="50%" variant="filled" color="blue" onClick={openModal}>
                     <IconPlus size={16} />
@@ -229,8 +209,8 @@ export function ThreadInbox(props: ThreadInboxProps): JSX.Element {
                       onChange={(page) => {
                         const offset = (page - 1) * itemsPerPage;
                         onChange({
-                          ...currentSearch,
-                          offset,
+                          ...filters,
+                          _offset: offset,
                         });
                       }}
                       size="sm"
@@ -251,7 +231,7 @@ export function ThreadInbox(props: ThreadInboxProps): JSX.Element {
                   <Stack h="100%" gap={0}>
                     <Flex h={64} align="center" justify="space-between" p="md">
                       <Text fw={800} truncate fz="lg">
-                        {selectedThread.topic?.text ?? 'Messages'}
+                        {selectedThread.topic ?? 'Messages'}
                       </Text>
 
                       <Menu position="bottom-end" shadow="md">
@@ -285,11 +265,9 @@ export function ThreadInbox(props: ThreadInboxProps): JSX.Element {
                     </Flex>
                     <Divider />
                     <Flex direction="column" style={{ flex: 1 }} h="100%">
-                      <ThreadChat
-                        key={`${getReferenceString(selectedThread)}`}
-                        title={'Messages'}
+                      <ThreadChatPanel
+                        key={selectedThread.id}
                         thread={selectedThread}
-                        excludeHeader={true}
                       />
                     </Flex>
                   </Stack>
@@ -297,10 +275,10 @@ export function ThreadInbox(props: ThreadInboxProps): JSX.Element {
               </Flex>
 
               {/* Right sidebar - Patient summary */}
-              {selectedThread.subject && showPatientSummary && (
+              {sidebarPatient && showPatientSummary && (
                 <Flex direction="column" w={300} h="100%">
                   <ScrollArea p={0} h="100%" scrollbarSize={10} type="hover" scrollHideDelay={250}>
-                    <PatientSummary key={selectedThread.id} patient={selectedThread.subject as Reference<Patient>} />
+                    <PatientSummary key={selectedThread.id} patient={sidebarPatient} />
                   </ScrollArea>
                 </Flex>
               )}
@@ -312,10 +290,129 @@ export function ThreadInbox(props: ThreadInboxProps): JSX.Element {
           )}
         </Flex>
       </div>
-      <NewTopicDialog subject={subject} opened={modalOpened} onClose={closeModal} onSubmit={handleNewTopicCompletion} />
+      <NewTopicDialog patientId={patientId} opened={modalOpened} onClose={closeModal} onSubmit={handleNewTopicCompletion} />
     </>
   );
 }
+
+// ─── Inline ThreadChat replacement ─────────────────────────────────
+
+interface ThreadChatPanelProps {
+  thread: Communication;
+}
+
+function ThreadChatPanel({ thread }: ThreadChatPanelProps): JSX.Element {
+  const [replies, setReplies] = useState<Communication[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [messageText, setMessageText] = useState('');
+  const [sending, setSending] = useState(false);
+  const { practitioner, organizationId } = useAuth();
+
+  const fetchReplies = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    try {
+      const data = await communicationService.getReplies(thread.id);
+      setReplies(data);
+    } catch (err) {
+      showErrorNotification(err);
+    } finally {
+      setLoading(false);
+    }
+  }, [thread.id]);
+
+  useEffect(() => {
+    fetchReplies().catch(console.error);
+  }, [fetchReplies]);
+
+  const handleSend = async (): Promise<void> => {
+    if (!messageText.trim() || !organizationId) return;
+    setSending(true);
+    try {
+      const newMessage = await communicationService.sendMessage({
+        organization_id: organizationId,
+        parent_id: thread.id,
+        patient_id: thread.patient_id,
+        sender_id: practitioner?.id ?? null,
+        payload_text: messageText.trim(),
+        status: 'completed',
+      });
+      setReplies((prev) => [...prev, newMessage as Communication]);
+      setMessageText('');
+    } catch (err) {
+      showErrorNotification(err);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <Flex direction="column" h="100%">
+      <ScrollArea style={{ flex: 1 }} p="md">
+        {loading ? (
+          <Center h={200}>
+            <Loader size="sm" />
+          </Center>
+        ) : replies.length === 0 ? (
+          <Center h={200}>
+            <Text c="dimmed" size="sm">No messages yet. Start the conversation below.</Text>
+          </Center>
+        ) : (
+          <Stack gap="md">
+            {replies.map((reply) => {
+              const isCurrentUser = reply.sender_id === practitioner?.id;
+              return (
+                <Flex key={reply.id} justify={isCurrentUser ? 'flex-end' : 'flex-start'}>
+                  <Box
+                    p="sm"
+                    style={{
+                      maxWidth: '70%',
+                      borderRadius: 'var(--mantine-radius-md)',
+                      backgroundColor: isCurrentUser
+                        ? 'var(--mantine-color-blue-light)'
+                        : 'var(--mantine-color-gray-light)',
+                    }}
+                  >
+                    <Text size="sm">{reply.payload_text}</Text>
+                    <Text size="xs" c="dimmed" mt={4}>
+                      {formatDateTime(reply.sent)}
+                    </Text>
+                  </Box>
+                </Flex>
+              );
+            })}
+          </Stack>
+        )}
+      </ScrollArea>
+      <Divider />
+      <Flex p="md" gap="sm" align="center">
+        <TextInput
+          placeholder="Type a message..."
+          value={messageText}
+          onChange={(e) => setMessageText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              handleSend().catch(console.error);
+            }
+          }}
+          style={{ flex: 1 }}
+          disabled={sending}
+        />
+        <ActionIcon
+          variant="filled"
+          color="blue"
+          onClick={() => handleSend().catch(console.error)}
+          disabled={!messageText.trim() || sending}
+          loading={sending}
+        >
+          <IconSend size={16} />
+        </ActionIcon>
+      </Flex>
+    </Flex>
+  );
+}
+
+// ─── Helper components ─────────────────────────────────────────────
 
 function NoMessages(): JSX.Element {
   return (
@@ -334,7 +431,7 @@ function NoMessages(): JSX.Element {
   );
 }
 
-function getStatusColor(status: Communication['status']): string {
+function getStatusColor(status: string): string {
   if (status === 'completed') {
     return 'green';
   }

@@ -2,22 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 import { ActionIcon, Box, Button, Flex, Group, Menu, Modal, Paper, SegmentedControl, Stack, Text } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import { formatDate, formatHumanName } from '@medplum/core';
-import type { Encounter, Practitioner, Reference } from '@medplum/fhirtypes';
 import { IconChevronDown, IconLock, IconLockOpen } from '@tabler/icons-react';
 import type { JSX } from 'react';
 import { useState } from 'react';
+import type { Tables } from '../../lib/supabase/types';
+import { formatDate, formatHumanName } from '../../lib/utils';
 import { ChartNoteStatus } from '../../types/encounter';
 import { SignLockDialog } from './SignLockDialog';
+
+type Encounter = Tables<'encounters'>;
+type Practitioner = Tables<'practitioners'>;
 
 interface EncounterHeaderProps {
   encounter: Encounter;
   practitioner?: Practitioner | undefined;
   chartNoteStatus?: ChartNoteStatus;
-  onStatusChange?: (status: Encounter['status']) => void;
+  onStatusChange?: (status: string) => void;
   onTabChange?: (tab: string) => void;
-  onSign?: (practitioner: Reference<Practitioner>, lock: boolean) => void;
-  onSignLock?: (practitioner: Reference<Practitioner>) => void;
+  onSign?: (practitionerId: string, lock: boolean) => void;
 }
 
 export const EncounterHeader = (props: EncounterHeaderProps): JSX.Element => {
@@ -29,12 +31,12 @@ export const EncounterHeader = (props: EncounterHeaderProps): JSX.Element => {
     onTabChange,
     onSign,
   } = props;
-  const [status, setStatus] = useState<Encounter['status']>(encounter.status);
+  const [status, setStatus] = useState<string>(encounter.status);
   const [activeTab, setActiveTab] = useState<string>('notes');
   const [confirmOpened, { open: openConfirm, close: closeConfirm }] = useDisclosure(false);
   const [signOpened, { open: openSign, close: closeSign }] = useDisclosure(false);
 
-  const handleStatusChange = (newStatus: Encounter['status']): void => {
+  const handleStatusChange = (newStatus: string): void => {
     if (newStatus === 'cancelled') {
       openConfirm();
       return;
@@ -50,8 +52,8 @@ export const EncounterHeader = (props: EncounterHeaderProps): JSX.Element => {
     closeConfirm();
   };
 
-  const onConfirmSign = (practitioner: Reference<Practitioner>, lock: boolean): void => {
-    onSign?.(practitioner, lock);
+  const onConfirmSign = (practitionerId: string, lock: boolean): void => {
+    onSign?.(practitionerId, lock);
     closeSign();
   };
 
@@ -67,9 +69,14 @@ export const EncounterHeader = (props: EncounterHeaderProps): JSX.Element => {
     openSign();
   };
 
-  const practitionerName = practitioner?.name?.[0] ? formatHumanName(practitioner.name[0]) : 'Unknown Provider';
-  const formattedDate = formatDate(encounter.period?.start);
+  const practitionerName = practitioner
+    ? formatHumanName(practitioner.given_name, practitioner.family_name)
+    : 'Unknown Provider';
+  const formattedDate = formatDate(encounter.period_start);
   const encounterDetail = formattedDate ? `${formattedDate} · ${practitionerName}` : practitionerName;
+
+  const clinicalData = encounter.clinical_data as Record<string, unknown> | null;
+  const visitLabel = (clinicalData?.display as string) || 'Visit';
 
   const renderMenuItems = (): JSX.Element | null => {
     if (status === 'planned') {
@@ -113,7 +120,7 @@ export const EncounterHeader = (props: EncounterHeaderProps): JSX.Element => {
         <Flex justify="space-between" align="center" p="lg">
           <Stack gap={0}>
             <Text fw={800} size="lg">
-              {encounter.basedOn?.[0]?.display || 'Visit'}
+              {visitLabel}
             </Text>
             <Text fw={500} size="xs" c="dimmed">
               {encounterDetail}
@@ -203,7 +210,7 @@ export const EncounterHeader = (props: EncounterHeaderProps): JSX.Element => {
   );
 };
 
-const getStatusColor = (status: Encounter['status']): string => {
+const getStatusColor = (status: string): string => {
   if (status === 'finished') {
     return 'green';
   }
@@ -216,7 +223,7 @@ const getStatusColor = (status: Encounter['status']): string => {
   return 'gray';
 };
 
-const getStatusDisplay = (status: Encounter['status']): string => {
+const getStatusDisplay = (status: string): string => {
   return status
     .split('-')
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))

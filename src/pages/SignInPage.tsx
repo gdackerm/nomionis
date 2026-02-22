@@ -1,22 +1,30 @@
-// SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
-// SPDX-License-Identifier: Apache-2.0
-import { Title } from '@mantine/core';
-import { Logo, SignInForm } from '@medplum/react';
+import { Button, Card, Center, Stack, Text, Title } from '@mantine/core';
+import { IconBrandGoogle } from '@tabler/icons-react';
 import type { JSX } from 'react';
-import { useNavigate } from 'react-router';
+import { useAuth } from '../providers/AuthProvider';
 
 export function SignInPage(): JSX.Element {
-  const navigate = useNavigate();
+  const { signInWithGoogle } = useAuth();
+
   return (
-    <SignInForm
-      // Configure according to your settings
-      googleClientId="921088377005-3j1sa10vr6hj86jgmdfh2l53v3mp7lfi.apps.googleusercontent.com"
-      onSuccess={() => navigate('/')?.catch(console.error)}
-    >
-      <Logo size={32} />
-      <Title order={3} py="lg">
-        Sign in to Provider
-      </Title>
-    </SignInForm>
+    <Center h="100vh">
+      <Card shadow="md" padding="xl" radius="md" w={400}>
+        <Stack align="center" gap="lg">
+          <Title order={2}>Nomionis</Title>
+          <Text c="dimmed" size="sm" ta="center">
+            Sign in to access the provider portal
+          </Text>
+          <Button
+            leftSection={<IconBrandGoogle size={18} />}
+            variant="default"
+            size="md"
+            fullWidth
+            onClick={() => signInWithGoogle()}
+          >
+            Sign in with Google
+          </Button>
+        </Stack>
+      </Card>
+    </Center>
   );
 }

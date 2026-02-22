@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Button, Group, Stack, Text } from '@mantine/core';
-import { Form, MedplumLink, ResourceAvatar, ResourceInput, useMedplum } from '@medplum/react';
-import { useResource } from '@medplum/react-hooks';
-import { createReference, formatHumanName, formatPeriod } from '@medplum/core';
-import type { Appointment, Patient, Reference } from '@medplum/fhirtypes';
+import { Autocomplete, Avatar, Button, Group, Stack, Text } from '@mantine/core';
 import type { JSX } from 'react';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router';
 import { showErrorNotification } from '../../utils/notifications';
+import { appointmentService } from '../../services/appointment.service';
+import { patientService } from '../../services/patient.service';
+import { formatDateTime, formatHumanName, formatPatientName, getInitials } from '../../lib/utils';
+import type { Tables } from '../../lib/supabase/types';
+
+type Appointment = Tables<'appointments'>;
+type Patient = Tables<'patients'>;
 
 type UpdateAppointmentFormProps = {
   appointment: Appointment;
@@ -15,51 +19,78 @@ type UpdateAppointmentFormProps = {
 };
 
 function UpdateAppointmentForm(props: UpdateAppointmentFormProps): JSX.Element {
-  const medplum = useMedplum();
-  const [patient, setPatient] = useState<Patient | undefined>(undefined);
+  const [patientId, setPatientId] = useState<string | undefined>(undefined);
+  const [patientSearchValue, setPatientSearchValue] = useState('');
+  const [patientOptions, setPatientOptions] = useState<{ value: string; label: string }[]>([]);
 
   const { appointment, onUpdate } = props;
-  const handleSubmit = useCallback(async () => {
-    if (!patient) {
-      return;
-    }
-    const updated = {
-      ...appointment,
-      participant: [
-        ...appointment.participant,
-        {
-          actor: createReference(patient),
-          status: 'tentative',
-        },
-      ],
-    } satisfies Appointment;
 
-    let result: Appointment;
-    try {
-      result = await medplum.updateResource(updated);
-    } catch (error) {
-      showErrorNotification(error);
+  const handlePatientSearch = useCallback(async (query: string): Promise<void> => {
+    if (!query.trim()) {
+      setPatientOptions([]);
       return;
     }
-    onUpdate?.(result);
-  }, [medplum, patient, appointment, onUpdate]);
+    try {
+      const patients = await patientService.search(query);
+      const options = patients.map((p: Patient) => ({
+        value: p.id,
+        label: formatPatientName(p),
+      }));
+      setPatientOptions(options);
+    } catch (err) {
+      showErrorNotification(err);
+    }
+  }, []);
+
+  const handlePatientSelect = useCallback(
+    (value: string): void => {
+      setPatientSearchValue(value);
+      const selected = patientOptions.find((o) => o.label === value);
+      if (selected) {
+        setPatientId(selected.value);
+      }
+    },
+    [patientOptions]
+  );
+
+  const handleSubmit = useCallback(
+    async (e: React.FormEvent): Promise<void> => {
+      e.preventDefault();
+      if (!patientId) {
+        return;
+      }
+
+      try {
+        const result = await appointmentService.update(appointment.id, { patient_id: patientId });
+        onUpdate?.(result as Appointment);
+      } catch (error) {
+        showErrorNotification(error);
+      }
+    },
+    [patientId, appointment, onUpdate]
+  );
 
   return (
-    <Form onSubmit={handleSubmit}>
+    <form onSubmit={handleSubmit}>
       <Stack gap="md">
-        <ResourceInput
+        <Autocomplete
           label="Patient"
-          resourceType="Patient"
-          name="Patient-id"
-          required={true}
-          onChange={(value) => setPatient(value as Patient)}
+          placeholder="Search patients..."
+          data={patientOptions.map((o) => o.label)}
+          value={patientSearchValue}
+          onChange={(value) => {
+            setPatientSearchValue(value);
+            handlePatientSearch(value).catch(console.error);
+            handlePatientSelect(value);
+          }}
+          required
         />
 
         <Button fullWidth type="submit">
           Update Appointment
         </Button>
       </Stack>
-    </Form>
+    </form>
   );
 }
 
@@ -67,23 +98,46 @@ export function AppointmentDetails(props: {
   appointment: Appointment;
   onUpdate: (appointment: Appointment) => void;
 }): JSX.Element {
-  const participantRef = props.appointment.participant.find((p) => p.actor?.reference?.startsWith('Patient/'));
-  const patientParticipant = useResource(participantRef?.actor as Reference<Patient> | undefined);
+  const { appointment, onUpdate } = props;
+  const [patient, setPatient] = useState<Patient | undefined>(undefined);
+
+  useEffect(() => {
+    const fetchPatient = async (): Promise<void> => {
+      if (appointment.patient_id) {
+        try {
+          const p = await patientService.getById(appointment.patient_id);
+          setPatient(p as Patient);
+        } catch (err) {
+          console.error('Failed to fetch patient:', err);
+        }
+      }
+    };
+    fetchPatient().catch(console.error);
+  }, [appointment.patient_id]);
+
+  const periodDisplay = [
+    formatDateTime(appointment.start_time),
+    formatDateTime(appointment.end_time),
+  ]
+    .filter(Boolean)
+    .join(' - ');
 
   return (
     <Stack gap="md">
-      <Text size="lg">{formatPeriod({ start: props.appointment.start, end: props.appointment.end })}</Text>
+      <Text size="lg">{periodDisplay}</Text>
 
-      {!participantRef && <UpdateAppointmentForm appointment={props.appointment} onUpdate={props.onUpdate} />}
+      {!appointment.patient_id && <UpdateAppointmentForm appointment={appointment} onUpdate={onUpdate} />}
 
-      {!!patientParticipant && (
+      {!!patient && (
         <Group align="center" gap="sm">
-          <MedplumLink to={patientParticipant}>
-            <ResourceAvatar value={patientParticipant} size={48} radius={48} />
-          </MedplumLink>
-          <MedplumLink to={patientParticipant} fw={800} size="lg">
-            {formatHumanName(patientParticipant.name?.[0])}
-          </MedplumLink>
+          <Link to={`/Patient/${patient.id}`}>
+            <Avatar size={48} radius={48} color="blue">
+              {getInitials(patient.given_name, patient.family_name)}
+            </Avatar>
+          </Link>
+          <Link to={`/Patient/${patient.id}`} style={{ fontWeight: 800, fontSize: 'var(--mantine-font-size-lg)', textDecoration: 'none', color: 'inherit' }}>
+            {formatHumanName(patient.given_name, patient.family_name)}
+          </Link>
         </Group>
       )}
     </Stack>

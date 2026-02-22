@@ -1,23 +1,17 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Box, Card, Stack, Textarea, Title } from '@mantine/core';
-import type { WithId } from '@medplum/core';
-import { createReference, getReferenceString } from '@medplum/core';
-import type {
-  ClinicalImpression,
-  Encounter,
-  Patient,
-  Practitioner,
-  Provenance,
-  Reference,
-  Task,
-} from '@medplum/fhirtypes';
-import { Loading, useMedplum, useResource } from '@medplum/react';
+import { Box, Card, Loader, Stack, Textarea, Title } from '@mantine/core';
 import type { JSX } from 'react';
 import { useCallback, useEffect, useState } from 'react';
 import { SAVE_TIMEOUT_MS } from '../../config/constants';
 import { useDebouncedUpdateResource } from '../../hooks/useDebouncedUpdateResource';
 import { useEncounterChart } from '../../hooks/useEncounterChart';
+import type { Tables } from '../../lib/supabase/types';
+import { useAuth } from '../../providers/AuthProvider';
+import { clinicalImpressionService } from '../../services/clinical-impression.service';
+import { encounterService } from '../../services/encounter.service';
+import { provenanceService } from '../../services/provenance.service';
+import { taskService } from '../../services/task.service';
 import { ChartNoteStatus } from '../../types/encounter';
 import { updateEncounterStatus } from '../../utils/encounter';
 import { showErrorNotification } from '../../utils/notifications';
@@ -26,11 +20,10 @@ import { BillingTab } from './BillingTab';
 import { EncounterHeader } from './EncounterHeader';
 import { SignAddendum } from './SignAddendum';
 
-const FHIR_ACT_REASON_SYSTEM = 'http://terminology.hl7.org/CodeSystem/v3-ActReason';
-const FHIR_PROVENANCE_PARTICIPANT_TYPE_SYSTEM = 'http://terminology.hl7.org/CodeSystem/provenance-participant-type';
-const FHIR_DOCUMENT_COMPLETION_SYSTEM = 'http://terminology.hl7.org/CodeSystem/v3-DocumentCompletion';
+type Encounter = Tables<'encounters'>;
+type Provenance = Tables<'provenances'>;
 
-const TASK_COMPLETED_STATUSES = new Set<Task['status']>([
+const TASK_COMPLETED_STATUSES = new Set<string>([
   'completed',
   'cancelled',
   'failed',
@@ -39,15 +32,29 @@ const TASK_COMPLETED_STATUSES = new Set<Task['status']>([
 ]);
 
 export interface EncounterChartProps {
-  encounter: WithId<Encounter> | Reference<Encounter>;
+  encounterId: string;
 }
 
 export const EncounterChart = (props: EncounterChartProps): JSX.Element => {
-  const { encounter: encounterProp } = props;
-  const medplum = useMedplum();
-  const encounterResource = useResource(encounterProp);
-  const patientReference = encounterResource?.subject as Reference<Patient> | undefined;
-  const patientResource = useResource(patientReference);
+  const { encounterId } = props;
+  const { practitioner: authPractitioner, organizationId } = useAuth();
+
+  const [encounterData, setEncounterData] = useState<Encounter | undefined>();
+  const [patientId, setPatientId] = useState<string | undefined>();
+
+  // Fetch encounter by ID
+  useEffect(() => {
+    const fetchEncounter = async (): Promise<void> => {
+      try {
+        const enc = await encounterService.getById(encounterId);
+        setEncounterData(enc as Encounter);
+        setPatientId(enc.patient_id);
+      } catch (err) {
+        showErrorNotification(err);
+      }
+    };
+    fetchEncounter().catch(console.error);
+  }, [encounterId]);
 
   const [activeTab, setActiveTab] = useState<string>('notes');
   const {
@@ -63,12 +70,19 @@ export const EncounterChart = (props: EncounterChartProps): JSX.Element => {
     setPractitioner,
     setTasks,
     setChargeItems,
-  } = useEncounterChart(encounterProp, patientReference);
+  } = useEncounterChart(encounterData);
 
-  const [chartNote, setChartNote] = useState<string | undefined>(clinicalImpression?.note?.[0]?.text);
-  const debouncedUpdateResource = useDebouncedUpdateResource(medplum, SAVE_TIMEOUT_MS);
+  const [chartNote, setChartNote] = useState<string | undefined>(clinicalImpression?.note_text ?? undefined);
+  const debouncedUpdate = useDebouncedUpdateResource(clinicalImpressionService, SAVE_TIMEOUT_MS);
   const [provenances, setProvenances] = useState<Provenance[]>([]);
   const [chartNoteStatus, setChartNoteStatus] = useState<ChartNoteStatus>(ChartNoteStatus.Unsigned);
+
+  // Sync chart note when clinical impression loads
+  useEffect(() => {
+    if (clinicalImpression?.note_text !== undefined) {
+      setChartNote(clinicalImpression.note_text ?? undefined);
+    }
+  }, [clinicalImpression?.note_text]);
 
   useEffect(() => {
     if (!encounter) {
@@ -76,11 +90,14 @@ export const EncounterChart = (props: EncounterChartProps): JSX.Element => {
     }
 
     const fetchProvenance = async (): Promise<void> => {
-      const provenance = await medplum.searchResources('Provenance', `target=${getReferenceString(encounter)}`);
-      setProvenances(provenance);
-      if (provenance.length > 0 && clinicalImpression?.status === 'completed') {
+      const result = await provenanceService.list({
+        filters: { target_type: 'encounters', target_id: encounter.id },
+      });
+      const provs = result.data as Provenance[];
+      setProvenances(provs);
+      if (provs.length > 0 && clinicalImpression?.status === 'completed') {
         setChartNoteStatus(ChartNoteStatus.SignedAndLocked);
-      } else if (provenance.length > 0) {
+      } else if (provs.length > 0) {
         setChartNoteStatus(ChartNoteStatus.Signed);
       } else {
         setChartNoteStatus(ChartNoteStatus.Unsigned);
@@ -88,29 +105,29 @@ export const EncounterChart = (props: EncounterChartProps): JSX.Element => {
     };
 
     fetchProvenance().catch((err) => showErrorNotification(err));
-  }, [clinicalImpression, encounter, medplum]);
+  }, [clinicalImpression, encounter]);
 
   const updateTaskList = useCallback(
-    (updatedTask: WithId<Task>): void => {
+    (updatedTask: Tables<'tasks'>): void => {
       setTasks((prevTasks) => prevTasks.map((task) => (task.id === updatedTask.id ? updatedTask : task)));
     },
     [setTasks]
   );
 
   const handleEncounterStatusChange = useCallback(
-    async (newStatus: Encounter['status']): Promise<void> => {
+    async (newStatus: string): Promise<void> => {
       if (!encounter) {
         return;
       }
 
       try {
-        const updatedEncounter = await updateEncounterStatus(medplum, encounter, appointment, newStatus);
-        setEncounter(updatedEncounter);
+        const updatedEncounter = await updateEncounterStatus(encounter.id, appointment?.id, newStatus);
+        setEncounter(updatedEncounter as Encounter);
       } catch (err) {
         showErrorNotification(err);
       }
     },
-    [encounter, medplum, setEncounter, appointment]
+    [encounter, setEncounter, appointment]
   );
 
   const handleTabChange = (tab: string): void => {
@@ -125,24 +142,14 @@ export const EncounterChart = (props: EncounterChartProps): JSX.Element => {
     }
 
     try {
-      if (!e.target.value || e.target.value === '') {
-        const { note: _, ...restOfClinicalImpression } = clinicalImpression;
-        const updatedClinicalImpression: ClinicalImpression = restOfClinicalImpression;
-        await debouncedUpdateResource(updatedClinicalImpression);
-      } else {
-        const updatedClinicalImpression: ClinicalImpression = {
-          ...clinicalImpression,
-          note: [{ text: e.target.value }],
-        };
-        await debouncedUpdateResource(updatedClinicalImpression);
-      }
+      debouncedUpdate(clinicalImpression.id, { note_text: e.target.value || null });
     } catch (err) {
       showErrorNotification(err);
     }
   };
 
-  const handleSign = async (practitioner: Reference<Practitioner>, lock: boolean): Promise<void> => {
-    if (!encounter) {
+  const handleSign = async (practitionerId: string, lock: boolean): Promise<void> => {
+    if (!encounter || !organizationId) {
       return;
     }
 
@@ -150,65 +157,32 @@ export const EncounterChart = (props: EncounterChartProps): JSX.Element => {
       // Complete all incomplete tasks
       const tasksToUpdate = tasks.filter((task) => !TASK_COMPLETED_STATUSES.has(task.status));
       const updatedTasks = await Promise.all(
-        tasksToUpdate.map((task) =>
-          medplum.updateResource({
-            ...task,
-            status: 'completed',
-          })
-        )
+        tasksToUpdate.map((task) => taskService.update(task.id, { status: 'completed' }))
       );
 
       setTasks(
         tasks.map((task) => {
-          const updated = updatedTasks.find((t) => t.id === task.id);
-          return updated || task;
+          const updated = updatedTasks.find((t: Tables<'tasks'>) => t.id === task.id);
+          return (updated as Tables<'tasks'>) || task;
         })
       );
     }
 
     // Create provenance record with signature
-    const newProvenance = await medplum.createResource<Provenance>({
-      resourceType: 'Provenance',
-      target: [createReference(encounter)],
-      recorded: new Date().toISOString(),
-      reason: [
-        {
-          coding: [
-            {
-              system: FHIR_ACT_REASON_SYSTEM,
-              code: 'SIGN',
-              display: 'Signed',
-            },
-          ],
-        },
-      ],
-      agent: [
-        {
-          type: {
-            coding: [
-              {
-                system: FHIR_PROVENANCE_PARTICIPANT_TYPE_SYSTEM,
-                code: 'author',
-              },
-            ],
-          },
-          who: practitioner,
-        },
-      ],
-      signature: [
-        {
-          type: [
-            {
-              system: FHIR_DOCUMENT_COMPLETION_SYSTEM,
-              code: 'LA',
-              display: 'legally authenticated',
-            },
-          ],
-          when: new Date().toISOString(),
-          who: practitioner,
-        },
-      ],
-    });
+    const signatureJson = {
+      type: 'legally-authenticated',
+      when: new Date().toISOString(),
+      who_id: practitionerId,
+    };
+
+    const newProvenance = (await provenanceService.create({
+      organization_id: organizationId,
+      target_type: 'encounters',
+      target_id: encounter.id,
+      agent_id: practitionerId,
+      reason_code: 'SIGN',
+      signature: signatureJson,
+    })) as Provenance;
 
     setProvenances([...provenances, newProvenance]);
 
@@ -219,8 +193,8 @@ export const EncounterChart = (props: EncounterChartProps): JSX.Element => {
     }
   };
 
-  if (!patientResource || !encounter) {
-    return <Loading />;
+  if (!patientId || !encounter) {
+    return <Loader />;
   }
 
   return (
@@ -243,7 +217,7 @@ export const EncounterChart = (props: EncounterChartProps): JSX.Element => {
                 <Card withBorder shadow="sm" mt="md">
                   <Title>Fill chart note</Title>
                   <Textarea
-                    defaultValue={clinicalImpression.note?.[0]?.text}
+                    defaultValue={clinicalImpression.note_text ?? undefined}
                     value={chartNote}
                     onChange={handleChartNoteChange}
                     autosize
@@ -268,7 +242,7 @@ export const EncounterChart = (props: EncounterChartProps): JSX.Element => {
               encounter={encounter}
               setEncounter={setEncounter}
               claim={claim}
-              patient={patientResource}
+              patient={patientId}
               practitioner={practitioner}
               setPractitioner={setPractitioner}
               chargeItems={chargeItems}

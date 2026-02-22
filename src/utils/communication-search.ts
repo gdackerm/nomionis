@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { parseSearchRequest } from '@medplum/core';
-import type { SearchRequest } from '@medplum/core';
-
 export interface NormalizeCommunicationSearchOptions {
   search?: string;
   defaultSort?: string;
@@ -14,7 +11,7 @@ export interface NormalizeCommunicationSearchOptions {
 
 export interface NormalizeCommunicationSearchResult {
   normalizedSearch: string;
-  parsedSearch: SearchRequest;
+  parsedSearch: Record<string, string>;
 }
 
 export function normalizeCommunicationSearch({
@@ -38,10 +35,17 @@ export function normalizeCommunicationSearch({
   addIfMissing('_count', defaultCount);
   addIfMissing('_total', defaultTotal);
 
-  const normalizedSearch = new URLSearchParams(entries).toString();
+  const normalizedParams = new URLSearchParams(entries);
+  const normalizedSearch = normalizedParams.toString();
+
+  // Build a simple key-value record from the params
+  const parsedSearch: Record<string, string> = {};
+  for (const [key, value] of normalizedParams.entries()) {
+    parsedSearch[key] = value;
+  }
 
   return {
     normalizedSearch,
-    parsedSearch: parseSearchRequest(`Communication?${normalizedSearch}`),
+    parsedSearch,
   };
 }

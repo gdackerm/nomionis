@@ -1,61 +1,100 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Button, Modal, Stack, Text, TextInput } from '@mantine/core';
+import { Autocomplete, Button, Modal, Stack, Text, TextInput } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
-import { createReference } from '@medplum/core';
-import type {
-  Communication,
-  Patient,
-  Practitioner,
-  Questionnaire,
-  QuestionnaireResponse,
-  Reference,
-} from '@medplum/fhirtypes';
-import { QuestionnaireForm, ResourceInput, useMedplum, useMedplumProfile } from '@medplum/react';
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { JSX } from 'react';
+import type { Tables } from '../../lib/supabase/types';
+import { formatHumanName, formatPatientName } from '../../lib/utils';
+import { useAuth, useCurrentUser } from '../../providers/AuthProvider';
+import { communicationService } from '../../services/communication.service';
+import { patientService } from '../../services/patient.service';
+import { supabase } from '../../lib/supabase/client';
 import { showErrorNotification } from '../../utils/notifications';
 
+type Communication = Tables<'communications'>;
+type Patient = Tables<'patients'>;
+
 interface NewTopicDialogProps {
-  subject: Reference<Patient> | Patient | undefined;
+  patientId?: string | undefined;
   opened: boolean;
   onClose: () => void;
   onSubmit?: (communication: Communication) => void;
 }
 
 export const NewTopicDialog = (props: NewTopicDialogProps): JSX.Element => {
-  const { subject, opened, onClose, onSubmit } = props;
-  const medplum = useMedplum();
-  const profile = useMedplumProfile();
-  const profileRef = useMemo(() => (profile ? createReference(profile) : undefined), [profile]);
+  const { patientId: defaultPatientId, opened, onClose, onSubmit } = props;
+  const { organizationId } = useAuth();
+  const currentUser = useCurrentUser();
 
   const [topic, setTopic] = useState('');
-  const [practitioners, setPractitioners] = useState<Reference<Practitioner>[]>(
-    profile?.resourceType === 'Practitioner' ? [createReference(profile) as Reference<Practitioner>] : []
-  );
-  const [patient, setPatient] = useState<Reference<Patient> | undefined>(
-    subject ? createReference(subject as Patient) : undefined
-  );
+  const [selectedPatientId, setSelectedPatientId] = useState<string | undefined>(defaultPatientId);
+  const [patientSearch, setPatientSearch] = useState('');
+  const [patientOptions, setPatientOptions] = useState<{ value: string; label: string }[]>([]);
+  const [practitionerSearch, setPractitionerSearch] = useState('');
+  const [practitionerOptions, setPractitionerOptions] = useState<{ value: string; label: string }[]>([]);
+  const [selectedRecipientIds, setSelectedRecipientIds] = useState<string[]>([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Create initial QuestionnaireResponse with current practitioner as default
-  const initialResponse: QuestionnaireResponse | undefined = useMemo(() => {
-    if (profile?.resourceType === 'Practitioner') {
-      return {
-        resourceType: 'QuestionnaireResponse',
-        status: 'in-progress',
-        item: [
-          {
-            linkId: 'q1',
-            answer: [{ valueReference: createReference(profile) as Reference<Practitioner> }],
-          },
-        ],
-      };
+  // Set default patient name
+  useEffect(() => {
+    if (defaultPatientId) {
+      setSelectedPatientId(defaultPatientId);
+      patientService
+        .getById(defaultPatientId)
+        .then((p) => setPatientSearch(formatPatientName(p as Patient)))
+        .catch(console.error);
     }
-    return undefined;
-  }, [profile]);
+  }, [defaultPatientId]);
+
+  // Add current user as default recipient
+  useEffect(() => {
+    if (currentUser) {
+      setSelectedRecipientIds([currentUser.id]);
+    }
+  }, [currentUser]);
+
+  const searchPatients = useCallback(async (query: string): Promise<void> => {
+    if (!query.trim() || query.length < 2) {
+      setPatientOptions([]);
+      return;
+    }
+    try {
+      const patients = await patientService.search(query);
+      setPatientOptions(
+        patients.map((p: Patient) => ({
+          value: p.id,
+          label: formatPatientName(p),
+        }))
+      );
+    } catch (err) {
+      showErrorNotification(err);
+    }
+  }, []);
+
+  const searchPractitioners = useCallback(async (query: string): Promise<void> => {
+    if (!query.trim() || query.length < 2) {
+      setPractitionerOptions([]);
+      return;
+    }
+    const { data } = await supabase
+      .from('practitioners')
+      .select('id, given_name, family_name')
+      .or(`family_name.ilike.%${query}%,given_name.ilike.%${query}%`)
+      .limit(10);
+
+    if (data) {
+      setPractitionerOptions(
+        data.map((p) => ({
+          value: p.id,
+          label: formatHumanName(p.given_name, p.family_name),
+        }))
+      );
+    }
+  }, []);
 
   const handleSubmit = async (): Promise<void> => {
-    if (!patient) {
+    if (!selectedPatientId) {
       showNotification({
         title: 'Error',
         message: 'Please select a patient',
@@ -64,28 +103,40 @@ export const NewTopicDialog = (props: NewTopicDialogProps): JSX.Element => {
       return;
     }
 
-    const communication: Communication = {
-      resourceType: 'Communication',
-      status: 'in-progress',
-      subject: patient,
-      sender: profileRef,
-      recipient: [
-        patient,
-        ...practitioners.map((practitioner) => ({
-          reference: practitioner.reference,
-        })),
-      ],
-      topic: {
-        text: topic,
-      },
-    };
+    if (!organizationId) {
+      showNotification({
+        title: 'Error',
+        message: 'Organization not configured',
+        color: 'red',
+      });
+      return;
+    }
 
+    setIsSubmitting(true);
     try {
-      const createdCommunication = await medplum.createResource(communication);
-      onSubmit?.(createdCommunication);
+      const newCommunication = await communicationService.sendMessage({
+        organization_id: organizationId,
+        status: 'in-progress',
+        patient_id: selectedPatientId,
+        sender_id: currentUser?.id ?? null,
+        recipient_ids: selectedRecipientIds.length > 0 ? selectedRecipientIds : null,
+        topic: topic || null,
+        payload_text: null,
+      });
+
+      onSubmit?.(newCommunication as Communication);
       onClose();
+
+      // Reset form
+      setTopic('');
+      if (!defaultPatientId) {
+        setSelectedPatientId(undefined);
+        setPatientSearch('');
+      }
     } catch (error) {
       showErrorNotification(error);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -94,72 +145,63 @@ export const NewTopicDialog = (props: NewTopicDialogProps): JSX.Element => {
       <Stack gap="xl">
         <Stack gap={0}>
           <Text fw={500}>Patient</Text>
-          <Text c="dimmed">Select a patient</Text>
-
-          <ResourceInput
-            resourceType="Patient"
-            name="patient"
-            required={true}
-            defaultValue={patient}
+          <Text c="dimmed" size="sm">
+            Select a patient
+          </Text>
+          <Autocomplete
+            placeholder="Search patients..."
+            value={patientSearch}
             onChange={(value) => {
-              setPatient(value ? (createReference(value) as Reference<Patient>) : undefined);
+              setPatientSearch(value);
+              searchPatients(value).catch(console.error);
             }}
+            onOptionSubmit={(value) => {
+              const selected = patientOptions.find((o) => o.label === value);
+              if (selected) {
+                setSelectedPatientId(selected.value);
+                setPatientSearch(selected.label);
+              }
+            }}
+            data={patientOptions.map((o) => o.label)}
+            disabled={!!defaultPatientId}
           />
         </Stack>
 
         <Stack gap={0}>
           <Text fw={500}>Practitioner (optional)</Text>
-          <Text c="dimmed">Select one or more practitioners</Text>
-
-          <QuestionnaireForm
-            questionnaire={questionnaire}
-            questionnaireResponse={initialResponse}
-            excludeButtons={true}
-            onChange={(value: QuestionnaireResponse) => {
-              const references =
-                value.item?.[0].answer
-                  ?.map((item) => item.valueReference)
-                  .filter((ref): ref is Reference<Practitioner> => ref !== undefined) ?? [];
-              setPractitioners(references);
+          <Text c="dimmed" size="sm">
+            Add a practitioner recipient
+          </Text>
+          <Autocomplete
+            placeholder="Search practitioners..."
+            value={practitionerSearch}
+            onChange={(value) => {
+              setPractitionerSearch(value);
+              searchPractitioners(value).catch(console.error);
             }}
+            onOptionSubmit={(value) => {
+              const selected = practitionerOptions.find((o) => o.label === value);
+              if (selected && !selectedRecipientIds.includes(selected.value)) {
+                setSelectedRecipientIds((prev) => [...prev, selected.value]);
+              }
+              setPractitionerSearch('');
+            }}
+            data={practitionerOptions.map((o) => o.label)}
           />
         </Stack>
 
         <Stack gap={0}>
           <Text fw={500}>Topic (optional)</Text>
-          <Text c="dimmed">Enter a topic for the message</Text>
-
+          <Text c="dimmed" size="sm">
+            Enter a topic for the message
+          </Text>
           <TextInput placeholder="Enter your topic" value={topic} onChange={(e) => setTopic(e.target.value)} />
         </Stack>
 
-        <Button onClick={handleSubmit}>Next</Button>
+        <Button onClick={handleSubmit} loading={isSubmitting}>
+          Next
+        </Button>
       </Stack>
     </Modal>
   );
-};
-
-const questionnaire: Questionnaire = {
-  resourceType: 'Questionnaire',
-  status: 'active',
-  item: [
-    {
-      linkId: 'q1',
-      type: 'reference',
-      repeats: true,
-      extension: [
-        {
-          url: 'http://hl7.org/fhir/StructureDefinition/questionnaire-referenceResource',
-          valueCodeableConcept: {
-            coding: [
-              {
-                system: 'http://hl7.org/fhir/fhir-types',
-                display: 'Practitioner',
-                code: 'Practitioner',
-              },
-            ],
-          },
-        },
-      ],
-    },
-  ],
 };

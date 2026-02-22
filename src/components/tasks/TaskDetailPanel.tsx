@@ -1,37 +1,43 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { Box, Paper, ScrollArea, SegmentedControl, Text } from '@mantine/core';
-import type { MedplumClient } from '@medplum/core';
-import type { Patient, Reference, ResourceType, Task } from '@medplum/fhirtypes';
-import { PatientSummary, ResourceTimeline, useMedplum, useResource } from '@medplum/react';
 import { useEffect, useState } from 'react';
 import type { JSX } from 'react';
+import type { Tables } from '../../lib/supabase/types';
+import { taskService } from '../../services/task.service';
+import { patientService } from '../../services/patient.service';
+import { showErrorNotification } from '../../utils/notifications';
+import { PatientSummary } from '../PatientSummary';
 import { TaskInputNote } from './TaskInputNote';
 import { TaskProperties } from './TaskProperties';
 import classes from './TaskBoard.module.css';
-import { showErrorNotification } from '../../utils/notifications';
+
+type Task = Tables<'tasks'>;
+type Patient = Tables<'patients'>;
 
 interface TaskDetailPanelProps {
-  task: Task | Reference<Task>;
+  task: Task;
   onTaskChange?: (task: Task) => void;
   onDeleteTask?: (task: Task) => void;
 }
 
 export function TaskDetailPanel(props: TaskDetailPanelProps): JSX.Element | null {
   const { task: taskProp, onTaskChange, onDeleteTask } = props;
-  const medplum = useMedplum();
-  const resolvedTask = useResource(taskProp);
-  const [task, setTask] = useState<Task | undefined>(resolvedTask);
+  const [task, setTask] = useState<Task>(taskProp);
   const [activeTab, setActiveTab] = useState<string>('properties');
+  const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
 
   useEffect(() => {
-    if (resolvedTask) {
-      setTask(resolvedTask);
-    }
-  }, [resolvedTask]);
+    setTask(taskProp);
+  }, [taskProp]);
 
-  const patientRef = task?.for as Reference<Patient>;
-  const selectedPatient = useResource<Patient>(patientRef);
+  useEffect(() => {
+    if (task.patient_id) {
+      patientService.getById(task.patient_id).then(setSelectedPatient).catch(() => setSelectedPatient(null));
+    } else {
+      setSelectedPatient(null);
+    }
+  }, [task.patient_id]);
 
   if (!task) {
     return (
@@ -42,14 +48,19 @@ export function TaskDetailPanel(props: TaskDetailPanelProps): JSX.Element | null
   }
 
   const handleTaskChange = async (updatedTask: Task): Promise<void> => {
-    await medplum.updateResource(updatedTask);
-    setTask(updatedTask);
-    onTaskChange?.(updatedTask);
+    try {
+      const { id, created_at, updated_at, ...updateFields } = updatedTask;
+      const result = await taskService.update(task.id, updateFields);
+      setTask(result as Task);
+      onTaskChange?.(result as Task);
+    } catch (error) {
+      showErrorNotification(error);
+    }
   };
 
   const handleDeleteTask = async (deletedTask: Task): Promise<void> => {
     try {
-      await medplum.deleteResource('Task', deletedTask.id as string);
+      await taskService.delete(deletedTask.id);
       onDeleteTask?.(deletedTask);
     } catch (error) {
       showErrorNotification(error);
@@ -112,15 +123,14 @@ export function TaskDetailPanel(props: TaskDetailPanelProps): JSX.Element | null
             )}
             {activeTab === 'activity-log' && (
               <ScrollArea h="calc(100vh - 120px)">
-                <ResourceTimeline
-                  value={task}
-                  loadTimelineResources={async (medplum: MedplumClient, _resourceType: ResourceType, id: string) => {
-                    return Promise.allSettled([medplum.readHistory('Task', id)]);
-                  }}
-                />
+                <Box p="md">
+                  <Text c="dimmed" ta="center">
+                    Activity log not available in POC
+                  </Text>
+                </Box>
               </ScrollArea>
             )}
-            {activeTab === 'patient-summary' && selectedPatient?.resourceType === 'Patient' && (
+            {activeTab === 'patient-summary' && selectedPatient && (
               <ScrollArea h="calc(100vh - 120px)">
                 <PatientSummary patient={selectedPatient} />
               </ScrollArea>

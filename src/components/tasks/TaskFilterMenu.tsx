@@ -4,34 +4,22 @@ import { Menu, ActionIcon, Text, Flex } from '@mantine/core';
 import {
   IconFilter,
   IconChevronRight,
-  IconUserCheck,
   IconStethoscope,
   IconCheck,
   IconExclamationCircle,
 } from '@tabler/icons-react';
 import type { JSX } from 'react';
-import type { Patient, Task, CodeableConcept } from '@medplum/fhirtypes';
 import { TaskFilterType, TASK_STATUSES, TASK_PRIORITIES } from './TaskFilterMenu.utils';
-import type { TaskFilterValue } from './TaskFilterMenu.utils';
+import type { TaskFilterValue, TaskStatus, TaskPriority } from './TaskFilterMenu.utils';
 
 interface TaskFilterMenuProps {
-  statuses?: Task['status'][];
-  owner?: Task['owner'];
-  performerType?: CodeableConcept;
-  priorities?: Task['priority'][];
-  patient?: Patient;
-  performerTypes?: CodeableConcept[];
+  statuses?: TaskStatus[];
+  priorities?: TaskPriority[];
   onFilterChange?: (filterType: TaskFilterType, value: TaskFilterValue) => void;
 }
 
 export function TaskFilterMenu(props: TaskFilterMenuProps): JSX.Element {
-  const { statuses = [], priorities = [], performerType, performerTypes, onFilterChange } = props;
-
-  const uniquePerformerTypes =
-    performerTypes?.filter((performerType, index, self) => {
-      const identifier = performerType.coding?.[0]?.code || performerType.text;
-      return identifier && self.findIndex((pt) => (pt.coding?.[0]?.code || pt.text) === identifier) === index;
-    }) || [];
+  const { statuses = [], priorities = [], onFilterChange } = props;
 
   return (
     <Menu shadow="md" width={200} position="bottom-start">
@@ -90,49 +78,12 @@ export function TaskFilterMenu(props: TaskFilterMenuProps): JSX.Element {
               {TASK_PRIORITIES.map((taskPriority) => (
                 <Menu.Item
                   key={taskPriority}
-                  onClick={() => onFilterChange?.(TaskFilterType.PRIORITY, taskPriority ?? '')}
+                  onClick={() => onFilterChange?.(TaskFilterType.PRIORITY, taskPriority)}
                   rightSection={priorities.includes(taskPriority) ? <IconCheck size={16} /> : null}
                 >
                   <Text size="sm">{taskPriority}</Text>
                 </Menu.Item>
               ))}
-            </Menu.Dropdown>
-          </Menu>
-        </Menu.Item>
-
-        <Menu.Item>
-          <Menu trigger="hover" openDelay={100} closeDelay={400} position="right-start" offset={5}>
-            <Menu.Target>
-              <Flex align="center" justify="space-between" w="100%">
-                <Flex align="center" gap="xs">
-                  <IconUserCheck size={16} />
-                  <Text size="sm">Performer Type</Text>
-                </Flex>
-                <IconChevronRight size={16} />
-              </Flex>
-            </Menu.Target>
-
-            <Menu.Dropdown>
-              <Menu.Label>Performer Types</Menu.Label>
-              {uniquePerformerTypes.length > 0 ? (
-                uniquePerformerTypes.map((type, index) => (
-                  <Menu.Item
-                    key={`${type.coding?.[0]?.code ?? index}`}
-                    onClick={() => onFilterChange?.(TaskFilterType.PERFORMER_TYPE, type)}
-                    rightSection={
-                      performerType?.coding?.[0]?.code === type.coding?.[0]?.code ? <IconCheck size={16} /> : null
-                    }
-                  >
-                    <Text size="sm">{type.coding?.[0]?.display ?? type.coding?.[0]?.code ?? 'Unknown'}</Text>
-                  </Menu.Item>
-                ))
-              ) : (
-                <Menu.Item disabled>
-                  <Text size="sm" c="dimmed">
-                    No performer types available
-                  </Text>
-                </Menu.Item>
-              )}
             </Menu.Dropdown>
           </Menu>
         </Menu.Item>

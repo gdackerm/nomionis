@@ -1,12 +1,17 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Group, Stack, Text } from '@mantine/core';
-import type { Communication, HumanName, Patient, Reference } from '@medplum/fhirtypes';
-import { MedplumLink, ResourceAvatar, useResource } from '@medplum/react';
+import { Avatar, Group, Stack, Text } from '@mantine/core';
+import type { Tables } from '../../lib/supabase/types';
 import type { JSX } from 'react';
-import { formatDateTime, formatHumanName } from '@medplum/core';
+import { useEffect, useState } from 'react';
+import { Link } from 'react-router';
+import { formatDateTime, formatPatientName, getInitials } from '../../lib/utils';
+import { patientService } from '../../services/patient.service';
 import classes from './ChatListItem.module.css';
 import cx from 'clsx';
+
+type Communication = Tables<'communications'>;
+type Patient = Tables<'patients'>;
 
 interface ChatListItemProps {
   topic: Communication;
@@ -17,16 +22,26 @@ interface ChatListItemProps {
 
 export const ChatListItem = (props: ChatListItemProps): JSX.Element => {
   const { topic, lastCommunication, isSelected, getThreadUri } = props;
-  const patientResource = useResource(topic.subject as Reference<Patient>);
-  const patientName = formatHumanName(patientResource?.name?.[0] as HumanName);
-  const lastMsg = lastCommunication?.payload?.[0]?.contentString;
+  const [patient, setPatient] = useState<Patient | undefined>(undefined);
+
+  useEffect(() => {
+    if (topic.patient_id) {
+      patientService
+        .getById(topic.patient_id)
+        .then((p) => setPatient(p as Patient))
+        .catch(console.error);
+    }
+  }, [topic.patient_id]);
+
+  const patientName = patient ? formatPatientName(patient) : '';
+  const lastMsg = lastCommunication?.payload_text;
   const trimmedMsg = lastMsg?.length && lastMsg.length > 100 ? lastMsg.slice(0, 100) + '...' : lastMsg;
-  const senderName = lastCommunication?.sender?.display ? `${lastCommunication?.sender?.display}: ` : '';
-  const content = trimmedMsg ? `${senderName} ${trimmedMsg}` : `No messages available`;
-  const topicName = topic.topic?.text ?? content;
+  const content = trimmedMsg ? trimmedMsg : 'No messages available';
+  const topicName = topic.topic ?? content;
+  const initials = patient ? getInitials(patient.given_name, patient.family_name) : '';
 
   return (
-    <MedplumLink to={getThreadUri(topic)} underline="never">
+    <Link to={getThreadUri(topic)} style={{ textDecoration: 'none', color: 'inherit' }}>
       <Group
         p="xs"
         align="center"
@@ -35,7 +50,9 @@ export const ChatListItem = (props: ChatListItemProps): JSX.Element => {
           [classes.selected]: isSelected,
         })}
       >
-        <ResourceAvatar value={topic.subject as Reference<Patient>} radius="xl" size={36} />
+        <Avatar radius="xl" size={36} color="blue">
+          {initials}
+        </Avatar>
         <Stack gap={0}>
           <Text size="sm" fw={700} truncate="end">
             {patientName}
@@ -48,6 +65,6 @@ export const ChatListItem = (props: ChatListItemProps): JSX.Element => {
           </Text>
         </Stack>
       </Group>
-    </MedplumLink>
+    </Link>
   );
 };

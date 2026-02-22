@@ -1,83 +1,75 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Box, Group, Skeleton, Stack } from '@mantine/core';
-import { createReference, normalizeOperationOutcome } from '@medplum/core';
-import type { OperationOutcome, Questionnaire, QuestionnaireResponse, Reference, Task } from '@medplum/fhirtypes';
-import {
-  OperationOutcomeAlert,
-  QuestionnaireForm,
-  QuestionnaireResponseDisplay,
-  useMedplum,
-  useMedplumProfile,
-} from '@medplum/react';
+import { Alert, Box, Code, Group, Loader, Skeleton, Stack, Text, Title } from '@mantine/core';
+import { IconAlertCircle } from '@tabler/icons-react';
 import { useEffect, useState } from 'react';
 import type { JSX } from 'react';
+import type { Tables, Json } from '../../../lib/supabase/types';
+import { questionnaireService } from '../../../services/questionnaire.service';
+import { questionnaireResponseService } from '../../../services/questionnaire-response.service';
+import { useCurrentUser } from '../../../providers/AuthProvider';
 import { showErrorNotification } from '../../../utils/notifications';
+import { supabase } from '../../../lib/supabase/client';
 
 interface TaskQuestionnaireFormProps {
-  task: Task;
-  onChangeResponse?: (response: QuestionnaireResponse) => void;
+  task: Tables<'tasks'>;
+  onChangeResponse?: (response: Tables<'questionnaire_responses'>) => void;
 }
 
 export const TaskQuestionnaireForm = ({ task, onChangeResponse }: TaskQuestionnaireFormProps): JSX.Element => {
-  const medplum = useMedplum();
-  const author = useMedplumProfile();
-  const [questionnaire, setQuestionnaire] = useState<Questionnaire | undefined>(undefined);
-  const [questionnaireResponse, setQuestionnaireResponse] = useState<QuestionnaireResponse | undefined>(undefined);
+  const currentUser = useCurrentUser();
+  const [questionnaire, setQuestionnaire] = useState<Tables<'questionnaires'> | undefined>(undefined);
+  const [questionnaireResponse, setQuestionnaireResponse] = useState<Tables<'questionnaire_responses'> | undefined>(
+    undefined
+  );
   const [loading, setLoading] = useState(false);
-  const [outcome, setOutcome] = useState<OperationOutcome | undefined>(undefined);
+  const [error, setError] = useState<string | undefined>(undefined);
 
+  // When task is completed, mark the response as completed too
   useEffect(() => {
     const updateQuestionnaireResponse = async (): Promise<void> => {
-      if (questionnaireResponse && task.status === 'completed' && questionnaireResponse?.status !== 'completed') {
-        const updatedResponse: QuestionnaireResponse = {
-          ...questionnaireResponse,
+      if (questionnaireResponse && task.status === 'completed' && questionnaireResponse.status !== 'completed') {
+        await questionnaireResponseService.update(questionnaireResponse.id, {
           status: 'completed',
-        };
-        await medplum.updateResource(updatedResponse);
+        });
       }
     };
     updateQuestionnaireResponse().catch(showErrorNotification);
-  }, [task, questionnaireResponse, medplum]);
+  }, [task, questionnaireResponse]);
 
-  const onChange = (response: QuestionnaireResponse): void => {
-    const baseResponse = questionnaireResponse || response;
-    const updatedResponse: QuestionnaireResponse = {
-      ...baseResponse,
-      item: response.item,
-      status: 'in-progress',
-      authored: new Date().toISOString(),
-      source: author && createReference(author),
-      encounter: task.encounter,
-    };
-
-    onChangeResponse?.(updatedResponse);
-  };
-
+  // Fetch questionnaire and existing response
   useEffect(() => {
     const fetchResources = async (): Promise<void> => {
-      const questionnaireReference = task.input?.[0]?.valueReference as Reference<Questionnaire>;
-      const questionnaireResponseReference = task.output?.[0]?.valueReference as Reference<QuestionnaireResponse>;
-
-      if (questionnaireResponseReference) {
-        const response = await medplum.readReference(questionnaireResponseReference);
-        setQuestionnaireResponse(response as QuestionnaireResponse);
+      if (task.focus_type !== 'Questionnaire' || !task.focus_id) {
+        return;
       }
 
-      if (questionnaireReference) {
-        const questionnaireResponse = await medplum.readReference(questionnaireReference);
-        setQuestionnaire(questionnaireResponse as Questionnaire);
+      // Load the questionnaire
+      const q = await questionnaireService.getById(task.focus_id);
+      setQuestionnaire(q as Tables<'questionnaires'>);
+
+      // Look for an existing response linked to this questionnaire and encounter
+      const { data: responses } = await supabase
+        .from('questionnaire_responses')
+        .select('*')
+        .eq('questionnaire_id', task.focus_id)
+        .eq('encounter_id', task.encounter_id ?? '')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (responses && responses.length > 0) {
+        setQuestionnaireResponse(responses[0] as Tables<'questionnaire_responses'>);
       }
     };
 
-    setOutcome(undefined);
+    setError(undefined);
     setLoading(true);
     fetchResources()
       .catch((err) => {
-        setOutcome(normalizeOperationOutcome(err));
+        setError(err instanceof Error ? err.message : 'Failed to load questionnaire');
       })
       .finally(() => setLoading(false));
-  }, [medplum, task]);
+  }, [task]);
 
   if (loading) {
     return <QuestionnaireSkeleton />;
@@ -86,20 +78,65 @@ export const TaskQuestionnaireForm = ({ task, onChangeResponse }: TaskQuestionna
   return (
     <Box p={0}>
       {task.status !== 'completed' && questionnaire && (
-        <QuestionnaireForm
-          questionnaire={questionnaire}
-          questionnaireResponse={questionnaireResponse}
-          excludeButtons={true}
-          onChange={onChange}
-        />
+        <Stack gap="md">
+          <Title order={4}>{questionnaire.title || 'Questionnaire'}</Title>
+          <Text c="dimmed" size="sm">
+            Questionnaire form -- items rendered from JSONB data.
+          </Text>
+          {questionnaire.items && (
+            <QuestionnaireItemsDisplay items={questionnaire.items} />
+          )}
+        </Stack>
       )}
       {task.status === 'completed' && questionnaireResponse && (
-        <QuestionnaireResponseDisplay questionnaireResponse={questionnaireResponse} />
+        <Stack gap="md">
+          <Title order={4}>Questionnaire Response</Title>
+          <Text c="dimmed" size="sm">Status: {questionnaireResponse.status}</Text>
+          {questionnaireResponse.items ? (
+            <Code block>{JSON.stringify(questionnaireResponse.items, null, 2)}</Code>
+          ) : (
+            <Text c="dimmed">No response data recorded.</Text>
+          )}
+        </Stack>
       )}
-      {outcome && <OperationOutcomeAlert outcome={outcome} />}
+      {error && (
+        <Alert icon={<IconAlertCircle size={16} />} title="Error" color="red">
+          {error}
+        </Alert>
+      )}
     </Box>
   );
 };
+
+/** Simple display of questionnaire items from JSONB */
+function QuestionnaireItemsDisplay({ items }: { items: Json }): JSX.Element {
+  if (!items || typeof items !== 'object') {
+    return <Text c="dimmed">No questionnaire items defined.</Text>;
+  }
+
+  const itemsArray = Array.isArray(items) ? items : [];
+
+  if (itemsArray.length === 0) {
+    return <Text c="dimmed">No questionnaire items defined.</Text>;
+  }
+
+  return (
+    <Stack gap="xs">
+      {itemsArray.map((item: any, index: number) => (
+        <Box key={item?.linkId || index} p="xs" style={{ borderLeft: '3px solid #dee2e6', paddingLeft: 12 }}>
+          <Text fw={500} size="sm">
+            {item?.text || item?.linkId || `Item ${index + 1}`}
+          </Text>
+          {item?.type && (
+            <Text c="dimmed" size="xs">
+              Type: {item.type}
+            </Text>
+          )}
+        </Box>
+      ))}
+    </Stack>
+  );
+}
 
 const QuestionnaireSkeleton = (): JSX.Element => (
   <Stack gap="lg">

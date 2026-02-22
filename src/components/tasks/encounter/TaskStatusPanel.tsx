@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { Flex, Menu, Text, Box, Badge, ActionIcon, Tooltip } from '@mantine/core';
-import type { Task } from '@medplum/fhirtypes';
+import type { Tables } from '../../../lib/supabase/types';
 import { IconChevronDown, IconPencil, IconCheck } from '@tabler/icons-react';
 import type { JSX } from 'react';
 
 interface TaskStatusPanelProps {
-  task: Task;
+  task: Tables<'tasks'>;
   enabled?: boolean;
   onActionButtonClicked: () => void;
-  onChangeStatus: (status: Task['status']) => void;
+  onChangeStatus: (status: string) => void;
 }
 
 export const TaskStatusPanel = (props: TaskStatusPanelProps): JSX.Element => {
@@ -45,7 +45,7 @@ export const TaskStatusPanel = (props: TaskStatusPanelProps): JSX.Element => {
                         </div>
                       ) : null
                     }
-                    onClick={() => onChangeStatus(status.value as Task['status'])}
+                    onClick={() => onChangeStatus(status.value)}
                   >
                     {status.label}
                   </Menu.Item>
@@ -78,7 +78,7 @@ const statuses = [
   { value: 'cancelled', label: 'Cancelled' },
 ];
 
-const getBadgeColor = (status: Task['status']): string => {
-  const colors = { completed: 'green', cancelled: 'red' };
-  return colors[status as keyof typeof colors] ?? 'blue';
+const getBadgeColor = (status: string): string => {
+  const colors: Record<string, string> = { completed: 'green', cancelled: 'red' };
+  return colors[status] ?? 'blue';
 };

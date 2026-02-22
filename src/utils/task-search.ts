@@ -1,21 +1,19 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { parseSearchRequest } from '@medplum/core';
-import type { SearchRequest, Filter } from '@medplum/core';
 
 export interface NormalizeTaskSearchOptions {
   /**
    * Additional filters to apply to the search request.
-   * These filters will be merged with existing filters, replacing any with the same code.
+   * These filters will be merged with existing filters, replacing any with the same key.
    */
-  additionalFilters?: Filter[];
+  additionalFilters?: Record<string, string>;
 }
 
 export interface NormalizeTaskSearchResult {
   /**
-   * The normalized search request with required fields set.
+   * The normalized search parameters as a simple key-value record.
    */
-  normalizedSearch: SearchRequest;
+  normalizedSearch: Record<string, string>;
   /**
    * Whether navigation is needed to update the URL with normalized parameters.
    */
@@ -24,40 +22,69 @@ export interface NormalizeTaskSearchResult {
 
 /**
  * Normalizes a task search request by ensuring required fields are present.
- * Checks for _lastUpdated sort rule, count, and total parameters.
+ * Checks for _sort, _count, and _total parameters.
  *
  * @param locationPathname - The pathname from useLocation()
  * @param locationSearch - The search string from useLocation()
  * @param options - Optional configuration for additional filters
- * @returns Normalized search request and whether navigation is needed
+ * @returns Normalized search parameters and whether navigation is needed
  */
 export function normalizeTaskSearch(
   locationPathname: string,
   locationSearch: string,
   options?: NormalizeTaskSearchOptions
 ): NormalizeTaskSearchResult {
-  const parsedSearch = parseSearchRequest(locationPathname + locationSearch);
-  const lastUpdatedSortRule = parsedSearch.sortRules?.find((rule) => rule.code === '_lastUpdated');
+  const params = new URLSearchParams(locationSearch);
 
-  let filters = parsedSearch.filters || [];
-  if (options?.additionalFilters) {
-    const additionalFilterCodes = new Set(options.additionalFilters.map((f) => f.code));
-    filters = filters.filter((f) => !additionalFilterCodes.has(f.code));
-    filters = [...filters, ...options.additionalFilters];
+  const hasSort = params.has('_sort');
+  const hasCount = params.has('_count');
+  const hasTotal = params.has('_total');
+
+  // Build the normalized search record
+  const result: Record<string, string> = {};
+
+  for (const [key, value] of params.entries()) {
+    // Skip keys that will be overridden by additional filters
+    if (options?.additionalFilters && key in options.additionalFilters) {
+      continue;
+    }
+    result[key] = value;
   }
 
-  const normalizedSearch: SearchRequest = {
-    ...parsedSearch,
-    filters,
-    sortRules: lastUpdatedSortRule ? parsedSearch.sortRules : [{ code: '_lastUpdated', descending: true }],
-    count: parsedSearch.count || 20,
-    total: parsedSearch.total || 'accurate',
-  };
+  // Merge additional filters
+  if (options?.additionalFilters) {
+    for (const [key, value] of Object.entries(options.additionalFilters)) {
+      result[key] = value;
+    }
+  }
 
-  const needsNavigation = !lastUpdatedSortRule || !parsedSearch.count || !parsedSearch.total;
+  // Set defaults if missing
+  if (!hasSort) {
+    result['_sort'] = '-_lastUpdated';
+  }
+  if (!hasCount) {
+    result['_count'] = '20';
+  }
+  if (!hasTotal) {
+    result['_total'] = 'accurate';
+  }
+
+  const needsNavigation = !hasSort || !hasCount || !hasTotal;
 
   return {
-    normalizedSearch,
+    normalizedSearch: result,
     needsNavigation,
   };
+}
+
+/**
+ * Converts a Record<string, string> search descriptor into a query string.
+ * Returns the query string without the leading '?'.
+ */
+export function formatTaskSearchQuery(search: Record<string, string>): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(search)) {
+    params.set(key, value);
+  }
+  return params.toString();
 }

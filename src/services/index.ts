@@ -1,0 +1,30 @@
+export { patientService } from './patient.service';
+export { encounterService } from './encounter.service';
+export { appointmentService } from './appointment.service';
+export { scheduleService } from './schedule.service';
+export { slotService } from './slot.service';
+export { taskService } from './task.service';
+export { communicationService } from './communication.service';
+export { conditionService } from './condition.service';
+export { observationService } from './observation.service';
+export { allergyService } from './allergy.service';
+export { medicationService } from './medication.service';
+export { immunizationService } from './immunization.service';
+export { familyHistoryService } from './family-history.service';
+export { consentService } from './consent.service';
+export { coverageService } from './coverage.service';
+export { careTeamService } from './care-team.service';
+export { clinicalImpressionService } from './clinical-impression.service';
+export { chargeItemService } from './charge-item.service';
+export { claimService } from './claim.service';
+export { serviceRequestService } from './service-request.service';
+export { documentReferenceService } from './document-reference.service';
+export { questionnaireService } from './questionnaire.service';
+export { questionnaireResponseService } from './questionnaire-response.service';
+export { planDefinitionService } from './plan-definition.service';
+export { provenanceService } from './provenance.service';
+export { relatedPersonService } from './related-person.service';
+
+// Re-export base types
+export type { ListOptions, ListResult } from './base';
+export { BaseService } from './base';

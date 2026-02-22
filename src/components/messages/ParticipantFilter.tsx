@@ -1,44 +1,54 @@
-// SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
+// SPDX-FileCopyrightText: Copyright Orangebot, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { ActionIcon, Checkbox, CloseButton, Group, Popover, Stack, Text, TextInput } from '@mantine/core';
+import { ActionIcon, Avatar, Checkbox, CloseButton, Group, Popover, Stack, Text, TextInput } from '@mantine/core';
 import { useDebouncedCallback, useDisclosure } from '@mantine/hooks';
-import { createReference, getReferenceString } from '@medplum/core';
-import type { Patient, Practitioner, Reference } from '@medplum/fhirtypes';
-import { ResourceAvatar, useMedplum, useMedplumProfile } from '@medplum/react';
 import { IconUsers } from '@tabler/icons-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { JSX } from 'react';
-import classes from './ParticipantFilter.module.css';
+import { useAuth, useCurrentUser } from '../../providers/AuthProvider';
+import { supabase } from '../../lib/supabase/client';
+import { formatHumanName, formatPatientName, getInitials } from '../../lib/utils';
 import { showErrorNotification } from '../../utils/notifications';
+import classes from './ParticipantFilter.module.css';
+
+export interface Participant {
+  id: string;
+  name: string;
+  type: 'patient' | 'practitioner';
+}
 
 interface ParticipantFilterProps {
-  selectedParticipants: Reference<Patient | Practitioner>[];
-  onFilterChange: (participants: Reference<Patient | Practitioner>[]) => void;
+  selectedParticipants: Participant[];
+  onFilterChange: (participants: Participant[]) => void;
 }
 
 export function ParticipantFilter(props: ParticipantFilterProps): JSX.Element {
   const { selectedParticipants, onFilterChange } = props;
   const [opened, { open, close }] = useDisclosure(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<Reference<Patient | Practitioner>[]>([]);
+  const [searchResults, setSearchResults] = useState<Participant[]>([]);
   const [isSearching, setIsSearching] = useState(false);
-  const [additionalParticipants, setAdditionalParticipants] = useState<Reference<Patient | Practitioner>[]>([]);
-  const medplum = useMedplum();
-  const profile = useMedplumProfile();
+  const [additionalParticipants, setAdditionalParticipants] = useState<Participant[]>([]);
+  const { organizationId } = useAuth();
+  const currentUser = useCurrentUser();
 
   // Current user participant - always shown at top
-  const currentUserParticipant = useMemo((): Reference<Patient | Practitioner> | undefined => {
-    if (!profile) {
+  const currentUserParticipant = useMemo((): Participant | undefined => {
+    if (!currentUser) {
       return undefined;
     }
-    return createReference(profile) as Reference<Patient | Practitioner>;
-  }, [profile]);
+    return {
+      id: currentUser.id,
+      name: formatHumanName(currentUser.given_name, currentUser.family_name),
+      type: 'practitioner',
+    };
+  }, [currentUser]);
 
   // Filter additional participants (excluding current user)
   useEffect(() => {
-    const currentUserRef = currentUserParticipant?.reference;
-    const filtered = selectedParticipants.filter((p) => p.reference !== currentUserRef);
+    const currentUserId = currentUserParticipant?.id;
+    const filtered = selectedParticipants.filter((p) => p.id !== currentUserId);
     setAdditionalParticipants(filtered);
   }, [selectedParticipants, currentUserParticipant]);
 
@@ -50,24 +60,56 @@ export function ParticipantFilter(props: ParticipantFilterProps): JSX.Element {
 
     setIsSearching(true);
     try {
-      const bundle = await medplum.search('Patient', {
-        _type: 'Patient,Practitioner',
-        name: query,
-        _count: '10',
-      });
+      const results: Participant[] = [];
+      const currentUserId = currentUserParticipant?.id;
+      const searchPattern = `%${query}%`;
 
-      const currentUserRef = currentUserParticipant?.reference;
+      // Search patients
+      const { data: patients, error: patientError } = await supabase
+        .from('patients')
+        .select('id, given_name, family_name')
+        .or(`family_name.ilike.${searchPattern},given_name.cs.{${query}}`)
+        .limit(5);
 
-      const results = (bundle.entry ?? [])
-        .map((entry) => entry.resource as Patient | Practitioner)
-        .filter((resource): resource is Patient | Practitioner => {
-          if (!resource) {
-            return false;
-          }
-          const refString = getReferenceString(resource);
-          return !!refString && refString !== currentUserRef;
-        })
-        .map((resource) => createReference(resource));
+      if (patientError) {
+        throw patientError;
+      }
+
+      for (const patient of patients ?? []) {
+        results.push({
+          id: patient.id,
+          name: formatPatientName(patient),
+          type: 'patient',
+        });
+      }
+
+      // Search practitioners
+      let practitionerQuery = supabase
+        .from('practitioners')
+        .select('id, given_name, family_name')
+        .or(`family_name.ilike.${searchPattern},given_name.ilike.${searchPattern}`)
+        .limit(5);
+
+      if (organizationId) {
+        practitionerQuery = practitionerQuery.eq('organization_id', organizationId);
+      }
+
+      const { data: practitioners, error: practitionerError } = await practitionerQuery;
+
+      if (practitionerError) {
+        throw practitionerError;
+      }
+
+      for (const practitioner of practitioners ?? []) {
+        if (practitioner.id === currentUserId) {
+          continue;
+        }
+        results.push({
+          id: practitioner.id,
+          name: formatHumanName(practitioner.given_name, practitioner.family_name),
+          type: 'practitioner',
+        });
+      }
 
       setSearchResults(results);
     } catch (error) {
@@ -82,39 +124,39 @@ export function ParticipantFilter(props: ParticipantFilterProps): JSX.Element {
     debouncedSearch(searchQuery);
   }, [searchQuery, debouncedSearch]);
 
-  const isSelected = (participant: Reference<Patient | Practitioner>): boolean => {
-    return selectedParticipants.some((p) => p.reference === participant.reference);
+  const isSelected = (participant: Participant): boolean => {
+    return selectedParticipants.some((p) => p.id === participant.id);
   };
 
-  const toggleParticipant = (participant: Reference<Patient | Practitioner>): void => {
+  const toggleParticipant = (participant: Participant): void => {
     const newParticipants = isSelected(participant)
-      ? selectedParticipants.filter((p) => p.reference !== participant.reference)
+      ? selectedParticipants.filter((p) => p.id !== participant.id)
       : [...selectedParticipants, participant];
 
     onFilterChange(newParticipants);
   };
 
-  const removeParticipant = (participant: Reference<Patient | Practitioner>): void => {
-    const newParticipants = selectedParticipants.filter((p) => p.reference !== participant.reference);
+  const removeParticipant = (participant: Participant): void => {
+    const newParticipants = selectedParticipants.filter((p) => p.id !== participant.id);
     onFilterChange(newParticipants);
   };
 
-  // Build display list: current user first, then additional selected, then search results
+  // Build display list: additional selected first, then search results
   const displayParticipants = useMemo(() => {
-    const result: Reference<Patient | Practitioner>[] = [];
+    const result: Participant[] = [];
 
     for (const p of additionalParticipants) {
-      if (!result.some((r) => r.reference === p.reference)) {
+      if (!result.some((r) => r.id === p.id)) {
         result.push(p);
       }
     }
 
     if (searchQuery.trim() && searchResults.length > 0) {
       for (const p of searchResults) {
-        if (currentUserParticipant?.reference === p.reference) {
+        if (currentUserParticipant?.id === p.id) {
           continue;
         }
-        if (!result.some((r) => r.reference === p.reference)) {
+        if (!result.some((r) => r.id === p.id)) {
           result.push(p);
         }
       }
@@ -172,7 +214,7 @@ export function ParticipantFilter(props: ParticipantFilterProps): JSX.Element {
 
             {displayParticipants.map((participant) => (
               <ParticipantItem
-                key={participant.reference}
+                key={participant.id}
                 participant={participant}
                 isSelected={isSelected(participant)}
                 isCurrentUser={false}
@@ -199,7 +241,7 @@ export function ParticipantFilter(props: ParticipantFilterProps): JSX.Element {
 }
 
 interface ParticipantItemProps {
-  participant: Reference<Patient | Practitioner>;
+  participant: Participant;
   isSelected: boolean;
   isCurrentUser: boolean;
   onToggle: () => void;
@@ -209,13 +251,22 @@ interface ParticipantItemProps {
 function ParticipantItem(props: ParticipantItemProps): JSX.Element {
   const { participant, isSelected, isCurrentUser, onToggle, onRemove } = props;
 
+  const initials = (() => {
+    const parts = participant.name.split(' ');
+    const first = parts[0]?.[0]?.toUpperCase() ?? '';
+    const last = parts[parts.length - 1]?.[0]?.toUpperCase() ?? '';
+    return first + (parts.length > 1 ? last : '');
+  })();
+
   return (
     <Group justify="space-between" wrap="nowrap" className={classes.participantItem}>
       <Group gap="sm" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
         <Checkbox checked={isSelected} onChange={onToggle} />
-        <ResourceAvatar value={participant} radius="xl" size={32} />
+        <Avatar radius="xl" size={32} color={participant.type === 'patient' ? 'blue' : 'green'}>
+          {initials}
+        </Avatar>
         <Text size="sm" truncate style={{ flex: 1 }}>
-          {participant.display ?? participant.reference}
+          {participant.name}
           {isCurrentUser && (
             <Text component="span" c="dimmed" size="sm">
               {' '}

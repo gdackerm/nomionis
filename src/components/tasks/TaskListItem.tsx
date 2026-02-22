@@ -1,12 +1,19 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Group, Stack, Text } from '@mantine/core';
-import { formatDate, formatHumanName } from '@medplum/core';
-import { MedplumLink, StatusBadge, useResource } from '@medplum/react';
-import type { HumanName, Task } from '@medplum/fhirtypes';
+import { Badge, Group, Stack, Text } from '@mantine/core';
+import { useEffect, useState } from 'react';
 import type { JSX } from 'react';
-import classes from './TaskListItem.module.css';
+import { Link } from 'react-router';
 import cx from 'clsx';
+import type { Tables } from '../../lib/supabase/types';
+import { formatDate, formatHumanName, formatPatientName, getStatusColor } from '../../lib/utils';
+import { patientService } from '../../services/patient.service';
+import { supabase } from '../../lib/supabase/client';
+import classes from './TaskListItem.module.css';
+
+type Task = Tables<'tasks'>;
+type Patient = Tables<'patients'>;
+type Practitioner = Tables<'practitioners'>;
 
 interface TaskListItemProps {
   task: Task;
@@ -17,13 +24,34 @@ interface TaskListItemProps {
 export function TaskListItem(props: TaskListItemProps): JSX.Element {
   const { task, selectedTask, getTaskUri } = props;
   const isSelected = selectedTask?.id === task.id;
-  const patient = useResource(task.for);
-  const owner = useResource(task.owner);
-  const taskFrom = task?.authoredOn ? `from ${formatDate(task?.authoredOn)}` : '';
+  const [patient, setPatient] = useState<Patient | null>(null);
+  const [owner, setOwner] = useState<Practitioner | null>(null);
+  const taskFrom = task.authored_on ? `from ${formatDate(task.authored_on)}` : '';
   const taskUrl = getTaskUri(task);
 
+  useEffect(() => {
+    if (task.patient_id) {
+      patientService.getById(task.patient_id).then(setPatient).catch(() => setPatient(null));
+    } else {
+      setPatient(null);
+    }
+  }, [task.patient_id]);
+
+  useEffect(() => {
+    if (task.owner_id) {
+      supabase
+        .from('practitioners')
+        .select('*')
+        .eq('id', task.owner_id)
+        .single()
+        .then(({ data }) => setOwner(data), () => setOwner(null));
+    } else {
+      setOwner(null);
+    }
+  }, [task.owner_id]);
+
   return (
-    <MedplumLink to={taskUrl} underline="never">
+    <Link to={taskUrl} style={{ textDecoration: 'none', color: 'inherit' }}>
       <Group
         p="xs"
         align="center"
@@ -35,19 +63,23 @@ export function TaskListItem(props: TaskListItemProps): JSX.Element {
         <Stack gap={0} flex={1}>
           <Group justify="space-between" align="flex-start" wrap="nowrap">
             <Text fw={700} className={classes.content}>
-              {task.code?.text ?? `Task ${taskFrom}`}
+              {(task.code as any)?.text ?? `Task ${taskFrom}`}
             </Text>
-            <StatusBadge status={task.status} variant="light" />
+            <Badge variant="light" color={getStatusColor(task.status)}>
+              {task.status}
+            </Badge>
           </Group>
           <Stack gap={0} c="dimmed">
-            {task.restriction?.period && <Text fw={500}>Due {formatDate(task.restriction?.period?.end)}</Text>}
-            {patient?.resourceType === 'Patient' && <Text>For: {formatHumanName(patient.name?.[0] as HumanName)}</Text>}
-            {owner?.resourceType === 'Practitioner' && (
-              <Text size="sm">Assigned to {formatHumanName(owner.name?.[0] as HumanName)}</Text>
+            {(task as any).restriction_period_end && (
+              <Text fw={500}>Due {formatDate((task as any).restriction_period_end)}</Text>
+            )}
+            {patient && <Text>For: {formatPatientName(patient)}</Text>}
+            {owner && (
+              <Text size="sm">Assigned to {formatHumanName(owner.given_name, owner.family_name)}</Text>
             )}
           </Stack>
         </Stack>
       </Group>
-    </MedplumLink>
+    </Link>
   );
 }

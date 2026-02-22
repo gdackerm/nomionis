@@ -1,98 +1,62 @@
-// SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
+// SPDX-FileCopyrightText: Copyright Orangebot, Inc.
 // SPDX-License-Identifier: Apache-2.0
-import { ActionIcon, Box, Card, Flex, Grid, Menu, Stack, Text, TextInput } from '@mantine/core';
-import type { WithId } from '@medplum/core';
-import { HTTP_HL7_ORG } from '@medplum/core';
-import type { ChargeItem, CodeableConcept, Money } from '@medplum/fhirtypes';
-import { CodeableConceptInput, useMedplum } from '@medplum/react';
+import { ActionIcon, Card, Flex, Grid, Menu, Stack, Text, TextInput } from '@mantine/core';
 import { IconTrash } from '@tabler/icons-react';
 import type { JSX } from 'react';
 import { useEffect, useState } from 'react';
+import type { Tables } from '../../lib/supabase/types';
+import { HTTP_HL7_ORG } from '../../lib/utils';
+import { chargeItemService } from '../../services/charge-item.service';
 import { applyChargeItemDefinition } from '../../utils/chargeitems';
+
+type ChargeItem = Tables<'charge_items'>;
 
 const CHARGE_ITEM_MODIFIER_URL = `${HTTP_HL7_ORG}/fhir/StructureDefinition/chargeitem-modifier`;
 const CPT_CODE_SYSTEM = 'http://www.ama-assn.org/go/cpt';
 
 export interface ChargeItemPanelProps {
-  chargeItem: WithId<ChargeItem>;
-  onChange: (chargeItem: WithId<ChargeItem>) => void;
-  onDelete: (chargeItem: WithId<ChargeItem>) => void;
+  chargeItem: ChargeItem;
+  onChange: (chargeItem: ChargeItem) => void;
+  onDelete: (chargeItem: ChargeItem) => void;
 }
 
 export default function ChargeItemPanel(props: ChargeItemPanelProps): JSX.Element {
   const { chargeItem, onChange, onDelete } = props;
-  const medplum = useMedplum();
-  const [modifierExtensionValue, setModifierExtensionValue] = useState<CodeableConcept | undefined>();
-  const [cptCodes, setCptCodes] = useState<CodeableConcept>();
-  const [price, setPrice] = useState<Money | undefined>();
+  const [cptCodeDisplay, setCptCodeDisplay] = useState<string>('');
+  const [price, setPrice] = useState<number | null>(null);
 
   useEffect(() => {
-    setPrice(chargeItem.priceOverride);
-    setModifierExtensionValue(getModifierExtension(chargeItem));
-    const cptCodes = chargeItem?.code?.coding?.filter((coding) => coding.system === CPT_CODE_SYSTEM) ?? [];
-    setCptCodes({ coding: cptCodes });
+    setPrice(chargeItem.price_override);
+    const coding = (chargeItem.code as any)?.coding;
+    const cptCoding = coding?.filter((c: any) => c.system === CPT_CODE_SYSTEM) ?? [];
+    const display = cptCoding.map((c: any) => `${c.code ?? ''} - ${c.display ?? ''}`).join(', ');
+    setCptCodeDisplay(display);
   }, [chargeItem]);
 
-  const updateModifiers = async (value: CodeableConcept | undefined): Promise<void> => {
-    if (!value) {
-      const updatedChargeItem = { ...chargeItem };
-      updatedChargeItem.extension = undefined;
-      await updateChargeItem(updatedChargeItem);
-      return;
-    }
-    const updatedChargeItem = { ...chargeItem };
-    updatedChargeItem.extension = updatedChargeItem.extension ? [...updatedChargeItem.extension] : [];
-    const modifierExtension = {
-      url: CHARGE_ITEM_MODIFIER_URL,
-      valueCodeableConcept: value,
-    };
-    const existingIndex = updatedChargeItem.extension.findIndex((ext) => ext.url === CHARGE_ITEM_MODIFIER_URL);
-    if (existingIndex >= 0) {
-      updatedChargeItem.extension[existingIndex] = modifierExtension;
-    } else {
-      updatedChargeItem.extension.push(modifierExtension);
-    }
-    await updateChargeItem(updatedChargeItem);
-  };
-
-  const updateChargeItem = async (updatedChargeItem: WithId<ChargeItem>): Promise<void> => {
-    await medplum.updateResource(updatedChargeItem);
-    const appliedChargeItem = await applyChargeItemDefinition(medplum, updatedChargeItem);
+  const updateChargeItem = async (updatedFields: Partial<ChargeItem>): Promise<void> => {
+    const updated = await chargeItemService.update(chargeItem.id, updatedFields);
+    const appliedChargeItem = await applyChargeItemDefinition(updated as ChargeItem);
     onChange(appliedChargeItem);
   };
 
   const deleteChargeItem = async (): Promise<void> => {
-    await medplum.deleteResource('ChargeItem', chargeItem.id);
+    await chargeItemService.delete(chargeItem.id);
     onDelete(chargeItem);
   };
-
-  const getModifierExtension = (item: WithId<ChargeItem>): CodeableConcept | undefined => {
-    if (item?.extension) {
-      const modifierExtension = item.extension.find((ext) => ext.url === CHARGE_ITEM_MODIFIER_URL);
-      return modifierExtension?.valueCodeableConcept;
-    }
-    return undefined;
-  };
-
-  const cptCodeKey = `cpt-${chargeItem.id}-${JSON.stringify(cptCodes?.coding)}`;
-  const modifierKey = `modifier-${chargeItem.id}-${JSON.stringify(modifierExtensionValue)}`;
 
   return (
     <Card withBorder shadow="sm" p={0}>
       <Stack gap="xs" p="md">
         <Flex justify="space-between" align="flex-start">
-          <Box flex={1} mr="md" maw="calc(100% - 60px)">
-            <CodeableConceptInput
-              key={cptCodeKey}
-              binding="http://www.ama-assn.org/go/cpt/vs"
-              label="CPT Code"
-              name="cptCode"
-              path="cptCode"
-              defaultValue={cptCodes}
-              readOnly
-              disabled={true}
-            />
-          </Box>
+          <TextInput
+            label="CPT Code"
+            value={cptCodeDisplay}
+            readOnly
+            disabled
+            flex={1}
+            mr="md"
+            maw="calc(100% - 60px)"
+          />
           <Menu shadow="md" width={200} position="bottom-end">
             <Menu.Target>
               <ActionIcon variant="subtle">
@@ -107,14 +71,11 @@ export default function ChargeItemPanel(props: ChargeItemPanelProps): JSX.Elemen
           </Menu>
         </Flex>
 
-        <CodeableConceptInput
-          key={modifierKey}
-          binding="http://hl7.org/fhir/ValueSet/claim-modifiers"
+        <TextInput
           label="Modifiers"
-          name="modifiers"
-          path="modifiers"
-          defaultValue={modifierExtensionValue}
-          onChange={updateModifiers}
+          placeholder="Modifiers are not editable in this view"
+          readOnly
+          value={getModifierDisplay(chargeItem)}
         />
 
         <Grid columns={12} mt="md">
@@ -130,10 +91,20 @@ export default function ChargeItemPanel(props: ChargeItemPanelProps): JSX.Elemen
             <Text size="sm" fw={500} mb={8}>
               Calculated Price
             </Text>
-            <TextInput value={price?.value ? `$${price.value.toFixed(2)}` : 'N/A'} readOnly />
+            <TextInput value={price != null ? `$${price.toFixed(2)}` : 'N/A'} readOnly />
           </Grid.Col>
         </Grid>
       </Stack>
     </Card>
   );
+}
+
+function getModifierDisplay(chargeItem: ChargeItem): string {
+  // Modifiers were stored in FHIR extensions; in the Supabase model
+  // they may be part of the code JSONB or a separate field.
+  // For now, attempt to read from the code JSONB extensions if present.
+  const coding = (chargeItem.code as any)?.coding;
+  if (!coding) return '';
+  const modifiers = coding.filter((c: any) => c.system === 'http://hl7.org/fhir/ValueSet/claim-modifiers');
+  return modifiers.map((m: any) => `${m.code ?? ''} - ${m.display ?? ''}`).join(', ');
 }

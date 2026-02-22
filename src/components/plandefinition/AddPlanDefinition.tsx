@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
+// SPDX-FileCopyrightText: Copyright Orangebot, Inc.
 // SPDX-License-Identifier: Apache-2.0
 import {
   Box,
@@ -15,14 +15,19 @@ import {
   Title,
 } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
-import { normalizeErrorString } from '@medplum/core';
-import type { PlanDefinition } from '@medplum/fhirtypes';
-import { useMedplum } from '@medplum/react';
 import { IconCircleCheck, IconCircleOff } from '@tabler/icons-react';
 import cx from 'clsx';
 import { useCallback, useEffect, useState } from 'react';
 import type { JSX } from 'react';
+import type { Tables } from '../../lib/supabase/types';
+import { normalizeErrorString } from '../../lib/utils';
+import { planDefinitionService } from '../../services/plan-definition.service';
+import { taskService } from '../../services/task.service';
+import { chargeItemService } from '../../services/charge-item.service';
+import { useAuth } from '../../providers/AuthProvider';
 import classes from './AddPlanDefinition.module.css';
+
+type PlanDefinition = Tables<'plan_definitions'>;
 
 interface AddPlanDefinitionProps {
   encounterId: string;
@@ -36,7 +41,7 @@ export const AddPlanDefinition = ({ encounterId, patientId, onApply }: AddPlanDe
   const [selectedPlanDefinition, setSelectedPlanDefinition] = useState<PlanDefinition | undefined>();
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
-  const medplum = useMedplum();
+  const { organizationId } = useAuth();
 
   const handleApplyPlanDefinition = async (): Promise<void> => {
     if (!selectedPlanDefinition) {
@@ -49,20 +54,45 @@ export const AddPlanDefinition = ({ encounterId, patientId, onApply }: AddPlanDe
       return;
     }
 
-    try {
-      await medplum.post(medplum.fhirUrl('PlanDefinition', selectedPlanDefinition.id as string, '$apply'), {
-        resourceType: 'Parameters',
-        parameter: [
-          {
-            name: 'subject',
-            valueString: `Patient/${patientId}`,
-          },
-          {
-            name: 'encounter',
-            valueString: `Encounter/${encounterId}`,
-          },
-        ],
+    if (!organizationId) {
+      showNotification({
+        color: 'red',
+        icon: <IconCircleOff />,
+        title: 'Error',
+        message: 'No organization context available',
       });
+      return;
+    }
+
+    try {
+      const actions = (selectedPlanDefinition.actions as any[]) ?? [];
+
+      // Create a task for each action in the plan definition
+      for (const action of actions) {
+        await taskService.create({
+          organization_id: organizationId,
+          patient_id: patientId,
+          encounter_id: encounterId,
+          status: 'requested',
+          intent: 'order',
+          description: action.title || action.description || null,
+          code: action.code ?? null,
+        });
+      }
+
+      // Check extensions for billing codes and create charge items if found
+      const extensions = (selectedPlanDefinition.extensions as any[]) ?? [];
+      for (const ext of extensions) {
+        if (ext.billingCode || ext.code) {
+          await chargeItemService.create({
+            organization_id: organizationId,
+            patient_id: patientId,
+            encounter_id: encounterId,
+            status: 'planned',
+            code: ext.billingCode ?? ext.code ?? null,
+          });
+        }
+      }
 
       showNotification({
         color: 'green',
@@ -86,11 +116,20 @@ export const AddPlanDefinition = ({ encounterId, patientId, onApply }: AddPlanDe
   const fetchPlanDefinitions = useCallback(
     (query?: string) => {
       setIsLoading(true);
-      const searchParam = query ? `name=${query}` : undefined;
-      medplum
-        .searchResources('PlanDefinition', searchParam)
+
+      const listOptions: Parameters<typeof planDefinitionService.list>[0] = {
+        filters: { status: 'active' },
+        pageSize: 50,
+      };
+
+      if (query?.trim()) {
+        listOptions.search = { column: 'title', query };
+      }
+
+      planDefinitionService
+        .list(listOptions)
         .then((result) => {
-          const filteredResult = result.filter((pd) => pd.name?.trim());
+          const filteredResult = result.data.filter((pd: PlanDefinition) => pd.title?.trim());
           setPlanDefinitions(filteredResult);
         })
         .catch((err) => {
@@ -105,7 +144,7 @@ export const AddPlanDefinition = ({ encounterId, patientId, onApply }: AddPlanDe
           setIsLoading(false);
         });
     },
-    [medplum]
+    []
   );
 
   useEffect(() => {
@@ -195,10 +234,7 @@ export const AddPlanDefinition = ({ encounterId, patientId, onApply }: AddPlanDe
                           onClick={() => setSelectedPlanDefinition(plan)}
                         >
                           <Text fz="md" fw={500} c={selectedPlanDefinition?.id === plan.id ? 'white' : undefined}>
-                            {plan.name}
-                          </Text>
-                          <Text fw={500} c={selectedPlanDefinition?.id === plan.id ? 'white' : 'dimmed'}>
-                            {plan.subtitle}
+                            {plan.title}
                           </Text>
                         </Card>
                       ))}
@@ -221,16 +257,13 @@ export const AddPlanDefinition = ({ encounterId, patientId, onApply }: AddPlanDe
                         <>
                           <Stack gap={0} p={0}>
                             <Text fz="md" fw={500}>
-                              {selectedPlanDefinition.name}
-                            </Text>
-                            <Text fw={500} c="dimmed">
-                              {selectedPlanDefinition.subtitle}
+                              {selectedPlanDefinition.title}
                             </Text>
                           </Stack>
 
                           <Stack gap="xs" pb="md">
-                            {selectedPlanDefinition.action?.map((action, index) => (
-                              <Card key={`${action.id}-task-${index}`} withBorder shadow="sm">
+                            {(selectedPlanDefinition.actions as any[])?.map((action: any, index: number) => (
+                              <Card key={`${action.id ?? index}-task-${index}`} withBorder shadow="sm">
                                 <Text fw={500}>{action.title}</Text>
                                 {action.description && <Text c="dimmed">{action.description}</Text>}
                               </Card>

@@ -1,14 +1,20 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Card, Stack, Text, Group, Textarea, Button, Divider } from '@mantine/core';
+import { Button, Card, Divider, Group, Stack, Text, Textarea } from '@mantine/core';
 import { IconLock, IconPencil, IconSignature } from '@tabler/icons-react';
-import type { Provenance, Encounter } from '@medplum/fhirtypes';
-import { useMedplum, useMedplumProfile } from '@medplum/react';
-import { useEffect, useState } from 'react';
 import type { JSX } from 'react';
+import { useEffect, useState } from 'react';
+import type { Tables } from '../../lib/supabase/types';
+import { formatDate, formatHumanName } from '../../lib/utils';
+import { useAuth, useCurrentUser } from '../../providers/AuthProvider';
+import { documentReferenceService } from '../../services/document-reference.service';
+import { supabase } from '../../lib/supabase/client';
 import { ChartNoteStatus } from '../../types/encounter';
-import { createReference, formatDate } from '@medplum/core';
 import { showErrorNotification } from '../../utils/notifications';
+
+type Provenance = Tables<'provenances'>;
+type Encounter = Tables<'encounters'>;
+type Practitioner = Tables<'practitioners'>;
 
 interface SignAddendumProps {
   provenances: Provenance[];
@@ -28,46 +34,73 @@ interface AddendumDisplay {
 }
 
 export const SignAddendum = ({ provenances, chartNoteStatus, encounter }: SignAddendumProps): JSX.Element | null => {
-  const medplum = useMedplum();
-  const author = useMedplumProfile();
-  const authorReference = author ? createReference(author) : undefined;
+  const { organizationId } = useAuth();
+  const currentUser = useCurrentUser();
   const [provenanceDisplays, setProvenanceDisplays] = useState<ProvenanceDisplay[]>([]);
   const [addendumDisplays, setAddendumDisplays] = useState<AddendumDisplay[]>([]);
   const [addendumText, setAddendumText] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Load provenance display data, looking up practitioner names from agent_id
   useEffect(() => {
     const loadProvenanceData = async (): Promise<void> => {
-      const displays: ProvenanceDisplay[] = provenances.map((prov) => ({
-        practitionerName: prov.agent?.[0]?.who?.display || 'Unknown Practitioner',
-        timestamp: formatDate(prov.recorded),
-      }));
+      const displays: ProvenanceDisplay[] = [];
+
+      for (const prov of provenances) {
+        let practitionerName = 'Unknown Practitioner';
+        if (prov.agent_id) {
+          const { data } = await supabase
+            .from('practitioners')
+            .select('given_name, family_name')
+            .eq('id', prov.agent_id)
+            .single();
+          if (data) {
+            practitionerName = formatHumanName(data.given_name, data.family_name);
+          }
+        }
+
+        displays.push({
+          practitionerName,
+          timestamp: formatDate(prov.created_at),
+        });
+      }
+
       setProvenanceDisplays(displays);
     };
-    loadProvenanceData().catch(showErrorNotification);
-  }, [provenances, medplum]);
 
+    loadProvenanceData().catch(showErrorNotification);
+  }, [provenances]);
+
+  // Load addendums (document references for this encounter)
   useEffect(() => {
     const loadAddendums = async (): Promise<void> => {
       try {
-        const bundle = await medplum.searchResources('DocumentReference', {
-          encounter: `Encounter/${encounter.id}`,
-          type: '55107-7', // LOINC code for Addendum Document
-          _sort: '-date',
+        const result = await documentReferenceService.list({
+          filters: {
+            patient_id: encounter.patient_id,
+            category: 'addendum',
+          },
+          orderBy: { column: 'created_at', ascending: false },
         });
 
-        const displays: AddendumDisplay[] = bundle.map((doc) => {
-          const authorName = doc.author?.[0]?.display || 'Unknown Author';
-          const timestamp = doc.date ? formatDate(doc.date) : 'Unknown Date';
-          const encodedText = doc.content?.[0]?.attachment?.data;
-          const text = encodedText ? atob(encodedText) : '';
+        // Filter to addendums related to this encounter by checking title pattern
+        const encounterAddendums = result.data.filter((doc: any) => {
+          const title = doc.title as string | null;
+          return title?.includes(`encounter:${encounter.id}`);
+        });
+
+        const displays: AddendumDisplay[] = encounterAddendums.map((doc: any) => {
+          const timestamp = formatDate(doc.created_at);
+          // The content_url stores the addendum text for inline addendums
+          const text = doc.content_url || '';
 
           return {
-            authorName,
+            authorName: doc.title?.replace(`encounter:${encounter.id}:`, '') || 'Unknown Author',
             timestamp,
             text,
           };
         });
+
         setAddendumDisplays(displays);
       } catch (error) {
         showErrorNotification(error);
@@ -77,54 +110,29 @@ export const SignAddendum = ({ provenances, chartNoteStatus, encounter }: SignAd
     if (encounter.id) {
       loadAddendums().catch(console.error);
     }
-  }, [encounter.id, medplum]);
+  }, [encounter.id, encounter.patient_id]);
 
   const handleAddAddendum = async (): Promise<void> => {
+    if (!organizationId || !currentUser) return;
+
     setIsSubmitting(true);
     try {
-      const documentReference = await medplum.createResource({
-        resourceType: 'DocumentReference',
+      const authorName = formatHumanName(currentUser.given_name, currentUser.family_name);
+
+      await documentReferenceService.create({
+        organization_id: organizationId,
+        patient_id: encounter.patient_id,
         status: 'current',
-        type: {
-          coding: [
-            {
-              system: 'http://loinc.org',
-              code: '55107-7',
-              display: 'Addendum Document',
-            },
-          ],
-        },
-        subject: encounter.subject,
-        author: [
-          {
-            reference: authorReference?.reference,
-            display: authorReference?.display,
-          },
-        ],
-        context: {
-          encounter: [
-            {
-              reference: `Encounter/${encounter.id}`,
-            },
-          ],
-        },
-        date: new Date().toISOString(),
-        content: [
-          {
-            attachment: {
-              contentType: 'text/plain',
-              data: btoa(addendumText),
-              title: 'Addendum',
-            },
-          },
-        ],
+        category: 'addendum',
+        content_url: addendumText,
+        title: `encounter:${encounter.id}:${authorName}`,
       });
 
       setAddendumDisplays([
         ...addendumDisplays,
         {
-          authorName: authorReference?.display || 'Unknown Author',
-          timestamp: formatDate(documentReference.date),
+          authorName,
+          timestamp: formatDate(new Date().toISOString()),
           text: addendumText,
         },
       ]);

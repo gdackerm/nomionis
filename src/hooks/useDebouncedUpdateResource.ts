@@ -1,28 +1,27 @@
-// SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
-// SPDX-License-Identifier: Apache-2.0
 import { useDebouncedCallback } from '@mantine/hooks';
-import type { MedplumClient } from '@medplum/core';
-import type { Resource } from '@medplum/fhirtypes';
+import type { Database } from '../lib/supabase/types';
+import type { BaseService } from '../services/base';
+
+type TableName = keyof Database['public']['Tables'];
 
 export const DEFAULT_SAVE_TIMEOUT_MS = 500;
 
 /**
- * Hook that provides a debounced version of medplum's updateResource
- *
- * @param medplum - The MedplumClient instance
- * @param timeoutMs - Optional timeout in milliseconds
- * @returns A debounced function that updates any Medplum resource
+ * Hook that provides a debounced update for any Supabase table.
+ * Drop-in replacement for the old Medplum version.
  */
-export function useDebouncedUpdateResource<T extends Resource>(
-  medplum: MedplumClient,
+export function useDebouncedUpdateResource<T extends TableName>(
+  service: BaseService<T>,
   timeoutMs: number = DEFAULT_SAVE_TIMEOUT_MS
-): (resourcePayload: T) => Promise<T> {
-  const debouncedCallback = useDebouncedCallback(async (resourcePayload: T): Promise<T> => {
-    return (await medplum.updateResource(resourcePayload)) as T;
-  }, timeoutMs);
+): (id: string, payload: Database['public']['Tables'][T]['Update']) => void {
+  const debouncedCallback = useDebouncedCallback(
+    async (id: string, payload: Database['public']['Tables'][T]['Update']) => {
+      await service.update(id, payload);
+    },
+    timeoutMs
+  );
 
-  return async (resourcePayload: T): Promise<T> => {
-    debouncedCallback(resourcePayload);
-    return resourcePayload;
+  return (id: string, payload: Database['public']['Tables'][T]['Update']) => {
+    debouncedCallback(id, payload);
   };
 }

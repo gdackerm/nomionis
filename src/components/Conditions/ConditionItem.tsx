@@ -1,9 +1,11 @@
-// SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
+// SPDX-FileCopyrightText: Copyright Orangebot, Inc.
 // SPDX-License-Identifier: Apache-2.0
-import type { Condition } from '@medplum/fhirtypes';
+import type { Tables } from '../../lib/supabase/types';
 import { ActionIcon, Select, Group, Flex, Text } from '@mantine/core';
 import { IconX } from '@tabler/icons-react';
 import type { JSX } from 'react';
+
+type Condition = Tables<'conditions'>;
 
 interface ConditionItemProps {
   condition: Condition;
@@ -15,6 +17,11 @@ interface ConditionItemProps {
 
 export default function ConditionItem(props: ConditionItemProps): JSX.Element {
   const { condition, rank, total, onChange, onRemove } = props;
+
+  const displayText =
+    condition.code_display ||
+    (condition.code as any)?.coding?.[0]?.display ||
+    '';
 
   return (
     <Flex justify="space-between">
@@ -30,7 +37,7 @@ export default function ConditionItem(props: ConditionItemProps): JSX.Element {
               }
             }}
           />
-          <Text>{condition?.code?.coding?.[0]?.display || ''}</Text>
+          <Text>{displayText}</Text>
         </Group>
       </Group>
       <ActionIcon
