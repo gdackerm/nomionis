@@ -30,7 +30,7 @@ async function fetchPractitioner(userId: string): Promise<Practitioner | null> {
     .from('practitioners')
     .select('*')
     .eq('auth_user_id', userId)
-    .single();
+    .maybeSingle();
 
   if (error) {
     console.error('Error fetching practitioner:', error);
