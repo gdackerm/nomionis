@@ -124,47 +124,46 @@ export function SignInPage(): JSX.Element {
           flex: 1,
           background: 'linear-gradient(135deg, #1864ab 0%, #228be6 60%, #339af0 100%)',
           display: 'flex',
-          alignItems: 'center',
+          flexDirection: 'column',
           justifyContent: 'center',
-          padding: 48,
-          paddingBottom: 96,
+          padding: '0 64px',
         }}
       >
-        <Stack gap="xl" maw={440}>
-          <Group gap="sm">
-            <ThemeIcon size={52} radius="xl" variant="white" color="blue">
-              <IconStethoscope size={28} />
+        <Stack gap={32} maw={480}>
+          <Group gap="md">
+            <ThemeIcon size={56} radius="xl" variant="white" color="blue">
+              <IconStethoscope size={30} />
             </ThemeIcon>
-            <Title order={1} c="white" fw={700} fz={28}>
+            <Title c="white" fw={700} fz={34}>
               Nomionis
             </Title>
           </Group>
 
           <Stack gap="sm">
-            <Title order={2} c="white" fw={600} fz={26}>
+            <Title c="white" fw={600} fz={30}>
               AI-native clinical intelligence
             </Title>
-            <Text c="rgba(255,255,255,0.8)" size="lg" lh={1.6}>
+            <Text c="rgba(255,255,255,0.85)" fz={18} lh={1.7}>
               Not AI bolted onto an EHR. A system built from the ground up
               where intelligence is the interface.
             </Text>
           </Stack>
 
-          <Stack gap="sm">
-            <Text c="rgba(255,255,255,0.65)" size="sm" fw={600} tt="uppercase" lts={1}>
+          <Stack gap="md">
+            <Text c="rgba(255,255,255,0.6)" fz={13} fw={600} tt="uppercase" lts={1.5}>
               When you open a patient chart, you see
             </Text>
-            <List spacing="md" center>
+            <List spacing="lg" center>
               {VALUE_PROPS.map((item) => (
                 <List.Item
                   key={item.text}
                   icon={
-                    <ThemeIcon size={34} radius="md" variant="light" color="rgba(255,255,255,0.2)">
-                      <item.icon size={18} color="white" />
+                    <ThemeIcon size={38} radius="md" variant="light" color="rgba(255,255,255,0.15)">
+                      <item.icon size={20} color="white" />
                     </ThemeIcon>
                   }
                 >
-                  <Text c="white" fw={500} size="md">
+                  <Text c="white" fw={500} fz={17}>
                     {item.text}
                   </Text>
                 </List.Item>
@@ -172,11 +171,11 @@ export function SignInPage(): JSX.Element {
             </List>
           </Stack>
 
-          <Group gap={8}>
-            <Text c="rgba(255,255,255,0.65)" size="sm">
+          <Group gap={8} mt={8}>
+            <Text c="rgba(255,255,255,0.55)" fz={14}>
               No tabs. No hunting. Just what matters right now.
             </Text>
-            <IconArrowRight size={16} color="rgba(255,255,255,0.65)" />
+            <IconArrowRight size={16} color="rgba(255,255,255,0.55)" />
           </Group>
         </Stack>
       </Box>
