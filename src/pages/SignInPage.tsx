@@ -25,6 +25,7 @@ import {
 } from '@tabler/icons-react';
 import type { JSX } from 'react';
 import { useState } from 'react';
+import { signInWithMicrosoft } from '../lib/supabase/auth';
 import { useAuth } from '../providers/AuthProvider';
 
 function GoogleLogo({ size = 18 }: { size?: number }) {
@@ -233,7 +234,7 @@ export function SignInPage(): JSX.Element {
                     size="md"
                     fullWidth
                     leftSection={<MicrosoftLogo />}
-                    onClick={() => {}}
+                    onClick={() => signInWithMicrosoft()}
                     styles={{ inner: { justifyContent: 'center' } }}
                   >
                     Continue with Microsoft

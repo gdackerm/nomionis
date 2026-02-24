@@ -16,6 +16,15 @@ export async function signUp(
   });
 }
 
+export async function signInWithMicrosoft() {
+  return supabase.auth.signInWithOAuth({
+    provider: 'azure',
+    options: {
+      scopes: 'openid profile email',
+    },
+  });
+}
+
 export async function signOut() {
   return supabase.auth.signOut();
 }
