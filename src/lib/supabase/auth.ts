@@ -21,6 +21,7 @@ export async function signInWithMicrosoft() {
     provider: 'azure',
     options: {
       scopes: 'openid profile email',
+      redirectTo: window.location.origin,
     },
   });
 }
